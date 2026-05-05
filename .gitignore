@@ -1,0 +1,72 @@
+# 🔹 Python cache
+
+**pycache**/
+*.py[cod]
+*$py.class
+
+# 🔹 Virtual environments
+
+venv/
+.venv/
+env/
+ENV/
+
+# 🔹 Environment variables (VERY IMPORTANT)
+
+.env
+.env.*
+
+# 🔹 Python build / packaging
+
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# 🔹 Logs
+
+*.log
+
+# 🔹 OS files (macOS)
+
+.DS_Store
+
+# 🔹 VS Code
+
+.vscode/
+
+# 🔹 PyCharm
+
+.idea/
+
+# 🔹 Jupyter Notebook
+
+.ipynb_checkpoints/
+
+# 🔹 Coverage / testing
+
+.coverage
+htmlcov/
+.pytest_cache/
+
+# 🔹 SQLite / local DB
+
+*.sqlite3
+*.db
+
+# 🔹 FastAPI / Uvicorn
+
+*.pid
+
+# 🔹 Misc
+
+*.swp
+*.swo
+
+# 🔹 Node (if used anywhere)
+
+node_modules/
+
+# 🔹 Assets (optional – if large files)
+
+# assets/
