@@ -1,0 +1,918 @@
+﻿API Externalisation Contracts v12
+Callouts To Clients
+High level SOP for New onboarding
+APIs
+1. List PO Events (Released/Updated in Past X days)
+API Headers
+Input Parameters
+Sample curl
+Sample Response
+EventType Enums
+Status Enums
+2.a. ASN Creation API
+API Path Params
+API Headers
+API Body
+Sample Curl
+Response Codes
+Response Structure
+2.b ASN Cancellation
+Input Parameters
+Sample CURL
+API Headers
+2.c ASN Listing API
+Sample Curl
+API Headers
+Sample Response
+3. PO Amendment API
+API Path Params
+API Headers
+API Body
+Attribute Name Enums
+Test Data for End-2-End Testing
+Test Data 1
+Test Data 2
+Callouts To Clients
+1. Clients should implement parsing logic for our API response schema that can handle the addition of new fields without breaking their systems. We guarantee no removal of existing fields; if removal is necessary, we will notify all clients in advance and proceed only after receiving their approval.
+2. Our security team will handle IP address whitelisting for all clients. If client’s IP addresses change, they’d need to inform us beforehand.
+3. For credential rotations in case of leaks, a hotline communication to be established.
+4. Vendors should send ASN quantities in unit sizes (pieces), not case sizes.
+5. All write APIs will require an X-Idempotency-Key header to prevent duplicate processing.
+6. There is no API for updating an ASN/Invoice. If an update is required, ASN/Invoice will have to be cancelled/deleted using the below api and re-create it again with different invoiceNumber
+7. Each API is rate-limited. Currently each api is rate-limited to be 60 RPM per clientId per api
+8. Masters to be maintained by Clients
+* Vendor-Codes
+* Store-Codes
+* SKU-Codes
+9. Timestamps in the api response will be in UTC time-zone
+
+
+High level SOP for New onboarding
+* Client shares their IP address with Zepto for IP whitelisting without which calls will be blocked
+* Zepto will share client-id and client-secret to the clients. Clients will add these values in the api headers while calling zepto api. These two values will help in authentication and authorization of the clients
+
+
+________________
+
+
+
+
+APIs
+1. List PO Events (Released/Updated in Past X days)
+This Paginated API, by default, retrieves the latest PO snapshots for all POs created in the last X days, sorted by release date in descending order. It can be used to get the status of all open POs or as a fallback if event-based integration fails. If more detailed information is needed in the response, use the appropriate input parameters as described below
+API Headers
+Header
+	Description
+	Content-Type
+	application/json — Specifies the request body format.
+	X-Client-Id
+	Your client ID for authentication (will be shared to you by zepto)
+	X-Client-Secret
+	Your client secret for authentication (will be shared to you by zepto)
+	Input Parameters
+Parameter
+	Description
+	days
+	The number of past days (now - days) for which you want to receive PO events. (Maximum: 45 days)
+	vendorCodes
+	Codes identifying the vendor. This parameter is optional; if not provided, all vendor codes under the client ID will be included in the response. (Maximum: 10 vendor codes)
+	poCodes
+	The PO Codes for which you want to retrieve event details. This parameter is optional; if not provided, events for all POs under the client ID will be included in the response. (Maximum: 10 PO numbers)
+	includeAllPoEvents
+	A boolean flag to request all streams of events for PO updates, rather than just the latest PO snapshot. This parameter is optional; the default value is `false`.
+	includeLineItemDetails
+	A boolean flag to include detailed line items in the response. This parameter is optional; the default value is `false`.
+	pageSize
+	The number of purchase orders returned per page. This parameter is optional; the default value is `10`, with a maximum of `20`.
+	pageNumber
+	The page number for pagination. This parameter is optional; the default value is `1`.
+	Sample curl
+GET /api/v1/external/po/events?days=7&pageSize=10&pageNumber=2&vendorCodes=KK-11111,KK-22222,KK-33333&includeLineItemDetails=true&poNumber=P431909,P431910
+Host: silkroute.zeptonow.dev
+clientId: client-id
+clientSecret: client-secret
+
+* Max size of days , pageSize will be restricted based on estimates and discussions
+* client-id and client-secret are static credentials and will be shared with clients at the time of their onboarding
+
+
+
+
+Use eventId as idempotency key to avoid re-processing the same event twice.
+Sample Response
+
+  "errors": ["", ""],
+  "data": {
+    "purchaseOrders": [
+      {
+        "timestamp": "2025-05-19T07:55:25.635674Z",
+        "eventId" : "e6e3b385-b6a4-4a4e-b1b4-2b98d77f0556",
+        "eventType": "CreatePO / UpdatePO / CancelPO",
+        "code": "P431909", 
+        "type": "FMCG",
+        "expiryDate": "2025-06-19T07:55:25.635674Z", 
+        "status": "RELEASED / EXPIRED /....",
+        "entityCode": "KWPL",
+        "entityName": "Kiranakart Wholesale Private Limited",
+        "vendorCode": "KK-123456",
+        "vendorName": "ABCD TRADING COMPANY Pvt Ltd",
+        "vendorType": "...",
+        "terms": "....",
+        "toStoreCode": "BLR065M",
+        "fromStoreCode": "",
+        "fromStoreName": "",
+        "toStoreName": "KTPL-KOL-DRY-MH NEW",
+        "deliveryDate": "2025-05-27T18:30:00Z",
+        "pdfFileName": "https://DownloadableLinkForPoPDF/P431909.pdf?X....",  //  link expires after few-days(7), download the pdf at the earliest 
+        "expiringPoPdfLink": https:
+        "address": {
+          "storeAddress": "PLOT no.44;2645;2652;2649; DHULAGORI,DIST: HOWRAH;PIN:711302",
+          "vendorAddress": "51, KAUSALYA VIHAR, A HAJYAWALA SANGANER, SANGANA, JAIPUR, RAJASTHAN - 302029",
+          "vendorPinCode": "302029",
+          "storeBillingAddress": "PLOT no.44;2645;2652;2649; DHULAGORI,DIST: HOWRAH;PIN:711302",g
+          "storeShippingAddress": "PLOT no.44;2645;2652;2649; DHULAGORI,DIST: HOWRAH;PIN:711302"
+        },
+        "financialDetails": {
+          "entityPan": "ABCDE1234F",
+          "vendorPan": "WXYZ5678G",
+          "entityGstin": "12ABCDE1234F1Z9",
+          "vendorGstin": ""
+        },
+        "isInterstate": false,
+        "totalQty": 540,
+        "cityId": "f938d139-3cb7-4b78-8980-b88178659225",
+        "poLineItems": [
+          {
+            "skuCode": "91001ec2-a11b-4b6a-b398-2167be477dbd",
+            "matetrialCode": "123456789",
+            "productName": "Portronics My Buddy F Multipurpose Movable & Adjustable Table - 1 pc",
+            "subCategory": "Household Utility",
+            "brandName": "Portronics",
+            "quantity": 500,          // pc, not case
+            "ean": "8904336806980",
+            "mrp": 200,
+            "costPrice": 160,  // price/piece , tax-inclusive
+            "margin": 20,
+            "dispatchMargin": 0.0,
+            "outboundMargin": 0.0,
+            "holdingMargin": 0.0,
+            "bfdMargin": 0.0,
+            "hsnCode": "94039000",
+            "hsnText": "Other Furniture And Parts Thereof -Parts",
+            "igstPercentage": 18.0,
+            "cgstPercentage": 0.0,
+            "sgstPercentage": 0.0,
+            "cessPercentage": 0.0,
+            "absoluteCess": 0.0,
+            "packSize": 1.0,
+            "totalAmount": 32000,             
+           "taxExclusiveCost": 135.59,
+
+
+          {
+          },
+            "skuCode": "fdc488ea-5615-4157-96f0-be79665bd3d5",
+            "matetrialCode": "123456789",
+            "productName": "Portronics Vayu Lite, 150 Psi Portable Tyre Inflator - Black - 1 pc",
+            "subCategory": "Automotive Needs",
+            "brandName": "Portronics",
+            "quantity": 40,
+            "ean": "8904336810062",
+            "mrp": 1200,
+            "costPrice": 720,
+            "margin": 40,
+            "dispatchMargin": 0.0,
+            "outboundMargin": 0.0,
+            "holdingMargin": 0.0,
+            "bfdMargin": 0.0,
+            "hsnCode": "84144090",
+            "hsnText": "AIR OR VACUUM PUMPS... OTHER",
+            "igstPercentage": 18.0,
+            "cgstPercentage": 0.0,
+            "sgstPercentage": 0.0,
+            "cessPercentage": 0.0,
+            "absoluteCess": 0.0,
+            "packSize": 1.0,
+            "totalAmount": 28800
+             "taxExclusiveCost": 610.1695,
+          }
+        ]
+      }
+    ],
+    "hasNext": true,
+    "pageNumber": 1,
+    "pageSize": 10
+  }
+}
+
+EventType Enums
+Enum
+	Description
+	`CreatePO`
+	Indicates the initial release of a Purchase Order (PO).
+	`UpdatePO`
+	Indicates subsequent changes made to an already released PO.
+	`CancelPO`
+	Indicates that a previously released PO has been cancelled.
+	Status Enums
+Enum
+	Description
+	`RELEASED`
+	The Purchase Order (PO) demand has been raised.
+	`LOCKED`
+	At least one invoice or Advance Ship Notice (ASN) has been received for the PO.
+	`CANCELLED`
+	The previously released PO has been cancelled.
+	`EXPIRED`
+	The previously released PO has expired.
+	
+
+________________
+
+
+
+
+
+
+2.a. ASN Creation API
+Zepto exposes this endpoint to inform us about any invoice/asn creation requests made by the vendors for any of our POs
+API Path Params
+
+
+POST /api/v1/external/asn/
+
+API Headers
+Header
+	Description
+	Content-Type
+	application/json — Specifies the request body format.
+	X-Idempotency-Key
+	[string] Unique identifier for the request generated and shared by the client. We will use this to identify duplicate requests (idempotency)
+(can be a uuid)
+	X-Client-Id
+	Your client ID for authentication (will be shared to you by zepto)
+	X-Client-Secret
+	Your client secret for authentication (will be shared to you by zepto)
+	API Body
+details of some key-attributes in the api-body
+Field
+	Type
+	Description
+	Possible Values/Formats
+	invoiceTotals.discountDetails.totalDiscountAmount
+	Float
+	The total discount amount applied in the invoice as against the base-price value in PO (Mandatory Field, Send 0 if NA)
+	A positive decimal number
+	invoiceTotals.grandTotalAmount
+	Float
+	The grand total amount, including taxes, after all discounts have been applied. (Mandatory Field)
+	A positive decimal number
+	invoiceDetails.invoiceNumber
+	String
+	The unique identifier for the invoice. (Mandatory Field, unique invoiceId required for each asn request)
+	Alphanumeric, no spaces
+	purchaseOrderDetails.purchaseOrderNumber
+	String
+	The unique identifier for the purchase order against which this invoice/asn is created (Mandatory Field)
+	Alphanumeric, no spaces
+	invoiceFile
+	File
+	PDF file containing invoice (Optional)
+	PDF file containing invoice
+	itemDetails[0].productIdentifier.buyerProductIdentifier.skuCode
+	String
+	The unique article code (sku_id) for the product which zepto understands (Mandatory Field)
+	Alphanumeric code
+	itemDetails[0].productIdentifier.buyerProductIdentifier.materialCode
+	String
+	The unique article code for the product which zepto understands (Mandatory Field)
+(one of skuCode or materialCode has to be present. Preferably send skuCode. If both are present, skuCode will be used by us)
+	Numeric code
+	itemDetails[0].mrp
+	Float
+	MRP of the invoiced quantities
+	A positive decimal number
+	itemDetails[0].basePrice
+	Float
+	Base-price (unit-cost, tax-exclusive) of the invoiced quantities
+	A positive decimal number
+	itemDetails[0].quantity.invoicedQuantity.amount
+	Float
+	The quantity of the product being invoiced. (Mandatory Field)
+	A positive decimal number
+	seller.soldFrom.id
+	String
+	The unique vendor code identifier used by Zepto, representing the vendor who is creating the ASN.
+	Alphanumeric
+	Sample Curl
+All decimals are expected to have precision within float-64/double
+curl -X POST "https://api.example.com/api/v1/external/asn" \
+-H "Content-Type: application/json" \
+-H 'X-Client-ID: <your-client-id>' \
+-H 'Content-Type: application/json' \
+-H 'X-Client-Secret: <your-client-secret>' \
+-H "X-Idempotency-Key: requestId" \
+-d '{
+  "purchaseOrderDetails": {
+    "purchaseOrderNumber": "P1048288",
+    "purchaseOrderDate": "2025-06-24",
+    "expiryDate": "2025-06-24"
+  },
+  "invoiceDetails": {
+    "invoiceNumber": "ABBMR-25-I007916", // unique
+    "invoiceType": "SSI",
+    "invoiceDate": "2025-06-24",
+    "shippingDate": "",
+    "deliveryDate": "2025-06-24",
+    "dueDate": "2025-06-24"
+  },
+  "invoiceFile": "PDF file binary to be sent in the api request",
+  "invoiceTotals": {
+    "currencyCode": "INR",
+    "discountDetails": {
+      "totalDiscountAmount": 0.0
+    },
+    "taxableAmount": 845485.33,
+    "grandTotalAmount": 924974.21
+  },
+  "itemDetails": [
+    {
+      "productIdentifier": {
+        "buyerProductIdentifier": {
+          "skuCode": "dcb4314a-c282-4b51-9eab-defd200bc9ee"
+          "materialCode": "123456"
+        },
+        "sellerProductIdentifier": {
+          "identifier": {
+            "identifierType": "EAN",
+            "identifierValue": "4987176319173"
+          },
+          "itemCode": "80844990",
+          "itemName": "WHSPRCHOICE T3EXLN FP36X20 (235) JWALA"
+        }
+      },
+      "batchDetails": {
+        "batchNumber": "930080844990XOC",
+        "manufacturingDate": "",
+        "expiryDate": ""
+      },
+      "quantity": {
+        "invoicedQuantity": {
+          "amount": 20,
+          "unitOfMeasure": "PC" // Only PC
+        },
+        "freeQuantity": {
+          "amount": 0,
+          "unitOfMeasure": "PC"
+        }
+      },
+      "mrp": 235.0,
+      "basePrice": 211.719999991, // tax exclusive
+      "taxDetails": [
+        {
+          "taxType": "GST",
+          "rateType": "CGST",
+          "currencyCode": "INR",
+          "taxAmount": 0.0,
+          "taxRate": null
+        },
+        {
+          "taxType": "GST",
+          "rateType": "SGST",
+          "currencyCode": "INR",
+          "taxAmount": 0.0,
+          "taxRate": null
+        },
+        {
+          "taxType": "GST",
+          "rateType": "IGST",
+          "currencyCode": "INR",
+          "taxAmount": 0.0,
+          "taxRate": null
+        }
+      ],
+      "netAmount": 4234.4
+    },
+    {
+      "productIdentifier": {
+        "buyerProductIdentifier": {
+          "skuCode": "44deb5c7-3700-4c4a-aac1-ed346d3480fb"
+          "materialCode": "123456"
+        },
+        "sellerProductIdentifier": {
+          "identifier": {
+            "identifierType": "EAN",
+            "identifierValue": "4987176211064"
+          },
+          "itemCode": "80815743",
+          "itemName": "PAMPERS PANTS HL4.1 XXL26SX6 JP IN"
+        }
+      },
+      "batchDetails": {
+        "batchNumber": "930080815743OC",
+        "manufacturingDate": "",
+        "expiryDate": ""
+      },
+      "quantity": {
+        "invoicedQuantity": {
+          "amount": 6,
+          "unitOfMeasure": "PC"
+        },
+        "freeQuantity": {
+          "amount": 0,
+          "unitOfMeasure": "PC"
+        }
+      },
+      "mrp": 899.0,
+      "basePrice": 668.999991,
+      "taxDetails": [
+        {
+          "taxType": "GST",
+          "rateType": "CGST",
+          "currencyCode": "INR",
+          "taxAmount": 240.8,
+          "taxRate": null
+        },
+        {
+          "taxType": "GST",
+          "rateType": "SGST",
+          "currencyCode": "INR",
+          "taxAmount": 240.8,
+          "taxRate": null
+        },
+        {
+          "taxType": "GST",
+          "rateType": "IGST",
+          "currencyCode": "INR",
+          "taxAmount": 0.0,
+          "taxRate": null
+        }
+      ],
+      "netAmount": 4495.0
+    }
+  ],
+  "seller": {
+    "soldFrom": {
+       }, "id": "KK-6587",
+      "name": "ABC DISTRIBUTORS Bangalore"
+    }
+
+
+  "buyer": {
+    "soldTo": {
+      "id": "BLR005M",
+      "name": "BLR-MYLAPURA MH"
+    }
+  }
+}'
+
+Response Codes
+Code
+	Scenarios
+	2XX
+	Processed successfully
+	4XX
+	Parsing Errors, Missing mandatory fields. (retires wont work on this request)
+	5XX
+	Some intermittent errors, retires are recommended on such requests
+	Response Structure
+{
+  "errors": [],
+  "data": {
+    "asnNumber": "JAI005MEA00972"
+  }
+}
+
+
+
+The ASNNumber sent in the response will have to be used in cancelASN api input to cancel an ASN
+There is no API for updating an ASN/Invoice. If an update is required, ASN/Invoice will have to be cancelled/deleted using the below api and re-create it again with different invoiceNumber
+
+
+________________
+
+
+
+
+2.b ASN Cancellation
+
+
+Input Parameters
+
+
+Parameter
+	Description
+	asnNumber
+	The asnNumber sent in response by zepto
+	
+
+Sample CURL
+
+
+curl -X DELETE "/api/v1/external/asn?asnNumber=JAI005MEA00972" \
+Host: silkroute.zeptonow.dev
+clientId: client-id
+clientSecret: client-secret
+X-Idempotency-Key: requestId
+
+API Headers
+Header
+	Description
+	Content-Type
+	application/json — Specifies the request body format.
+	X-Idempotency-Key
+	[string] Unique identifier for the request generated and shared by Clients. We will use this to identify duplicate requests (idempotency)
+	X-Client-Id
+	[string] Your client ID for authentication (will be shared to you by zepto)
+	X-Client-Secret
+	[string] Your client secret for authentication (will be shared to you by zepto), Multiple secrets possible during rotation
+	
+
+
+
+________________
+
+
+
+
+
+
+2.c ASN Listing API
+Zepto exposes this endpoint to publish the invoice/asns created for an poNumber
+
+
+Sample Curl
+
+
+curl -X GET "/api/v1/external/asn?poCode=P1048288&pageSize=10&pageNumber=1" \
+Host: silkroute.zeptonow.dev
+clientId: client-id
+clientSecret: client-secret
+
+API Headers
+Header
+	Description
+	Content-Type
+	application/json — Specifies the request body format.
+	X-Client-Id
+	Your client ID for authentication (will be shared to you by zepto)
+	X-Client-Secret
+	Your client secret for authentication (will be shared to you by zepto)
+	
+
+
+
+Parameter
+	Description
+	poCode
+	PoCode for which client wants to get the ASN details of. Mandatory Field
+	pageSize
+	Number of purchase orders returned per page (optional, default=10)
+	pageNumber
+	Page number for pagination (optional, default=1)
+	
+
+
+
+Sample Response
+
+
+{
+  "errors": [],
+  "data": {
+    "ASNs": [
+      {
+        "asnNumber": "BLR005MEA05EE5",
+        "invoiceNumber": "INV-1",
+        "poNumber": "P1048288",
+        "vendor": "KK-6587",
+        "vendorName": "ABC DISTRIBUTORS PVT LTD-BANGALORE",
+        "sellerName": "Kiranakart Technologies Private Limited",
+        "locationCode": "BLR005M",
+        "locationName": "BLR-MYLAPURA MH",
+        "poQuantity": 2844,
+        "asnQuantity": 354,
+        "totalSKU": 4,
+        "totalAmount": 1140491.08,
+        "asnTotalAmount": 92138.2,
+        "status": "CREATED"
+      },
+      {
+        "asnNumber": "BLR005MEA05EE4",
+        "invoiceNumber": "INV-2",
+        "poNumber": "P1048288",
+        "vendor": "KK-6587",
+        "vendorName": "ABC DISTRIBUTORS PVT LTD-BANGALORE",
+        "sellerName": "Kiranakart Technologies Private Limited",
+        "locationCode": "BLR005M",
+        "locationName": "BLR-MYLAPURA MH",
+        "poQuantity": 2844,
+        "asnQuantity": 2250,
+        "totalSKU": 62,
+        "totalAmount": 1140491.08,
+        "asnTotalAmount": 924970.73,
+        "status": "CANCELLED"
+      }
+    ],
+    "hasNext": false,
+    "pageNumber": 1,
+    "pageSize": 10
+  }
+}
+
+
+
+
+
+________________
+
+
+
+
+
+
+3. PO Amendment API 
+API Path Params
+
+
+PUT /api/v1/external/po/{poNumber}/amendment
+
+* {poNumber}: The poNumber for which the amendment is to be requested
+API Headers
+Header
+	Description
+	Content-Type
+	application/json — Specifies the request body format.
+	X-Idempotency-Key
+	[string] Unique identifier for the request generated and shared by Clients. We will use this to identify duplicate requests (idempotency)
+	X-Client-Id
+	[string] Your client ID for authentication (will be shared to you by zepto)
+	X-Client-Secret
+	[string] Your client secret for authentication (will be shared to you by zepto), Multiple secrets possible during rotation
+	API Body
+Sample Curl
+
+
+curl -X POST --request POST 'https://silkroute.zeptonow.dev/api/v1/external/po/{po_number}/amendment' \
+--header 'X-Client-ID: <your-client-id>' \
+--header 'Content-Type: application/json' \
+--header 'X-Client-Secret: <your-client-secret>' \
+--header 'Host: silkroute.zeptonow.dev' \
+--header 'X-Idempotency-Key: 6a146407-888e-4825-980d-62badc07476' \
+--data '{
+    "purchaseOrderAmendment": {
+        "purchaseOrderNumber": "<po_number>",
+        "poAttributes":[
+
+
+             "attributeName": "EXPIRY_DATE",
+             "previousValue": "2025-10-25",
+             "recommendedValue": "2025-11-25",
+             "reasonForAmendment": "please extended expiry date"
+          },
+          {
+             "attributeName": "VENDOR_GSTIN",
+             "previousValue": "27AAACD1234F1Z5",
+             "recommendedValue": "27AAACD1234F1Z6",
+             "reasonForAmendment": "GSTIN is incorrect"
+         }
+         ],
+        "itemDetails": [
+            {
+              "productIdentifier": {
+                    "skuCode": "44deb5c7-3700-4c4a-aac1-ed346d3480fb",
+                    "materialCode": "12345678",
+                    "skuName": "ACME Article 1",
+                    "identifier": {
+                        "identifierType": "EAN",
+                        "identifierValue": "0887276302195"
+                    }
+                },
+                "amendments": [
+                    {
+                        "attributeName": "MRP / BASE_PRICE / ...",
+                        "previousValue": "0887276302195",
+                        "recommendedValue": "01234567890135",
+                        "reasonForAmendment": "Incorrect EAN"
+                    }
+                ]
+            }
+        ]
+    }
+}'
+
+Attribute Name Enums
+Attribute
+	Amendment Reason
+	MRP
+	Request amendment if there is a mismatch between the PO and your master data.
+	BASE_PRICE
+	Request amendment if there is a mismatch in margins or net-landing-cost for any product in the PO. (This field is tax-inclusive)
+	EAN
+	Request amendment if there is a mismatch between the EAN in the PO and the productVariantId/productDescription.
+	CASE_SIZE
+	Request amendment if you are receiving POs for quantities that are not multiples of the product's case-size.
+	EXPIRY_DATE
+	Request amendment if the expiry date is too short to fulfill products within the given timeframe.
+	
+
+
+
+
+
+________________
+
+
+
+
+Test Data for End-2-End Testing
+Please set up the store-codes, vendor-codes, sku-codes etc…. from the below test data in your non-prod environment for testing purposes. 
+We will be utilising these entities for end-2-end testing before going live in Production
+Test Data 1
+{
+ "timestamp": "2025-07-28T10:56:15Z",
+ "eventId": "435c3baf-4c42-4cfd-9411-2c01b9a84a61",
+ "eventType": "CreatePO",
+ "code": "P198723",
+ "type": "FMCG",
+ "expiryDate": "2025-10-25T18:29:59Z",
+ "status": "RELEASED",
+ "entityCode": "KIRA",
+ "entityName": "Zepto Private Limited",
+ "vendorCode": "KKT-45129",
+ "vendorName": "TEST heirarchy manav-march-04-03-abhi",
+ "vendorType": "",
+ "terms": "",
+ "toStoreCode": "MI568M",
+ "fromStoreCode": "",
+ "fromStoreName": "",
+ "toStoreName": "TestMhStore8d9765dfc55-test-abhilash",
+ "deliveryDate": "2025-09-23T18:30:00Z",
+ "pdfFileName": "d1bd0828-fe31-4393-9956-2b7a64d25614.pdf",
+ "address": {
+   "storeAddress": "9FH7+WJW, Nainital Rd, Tallital, Nainital, Uttarakhand 263002",
+   "vendorAddress": "NO.29 SANKEY ROAD BANGALORE Bengaluru (Bangalore) Urban Karnataka 560001",
+   "vendorPinCode": "560001",
+   "storeBillingAddress": "9FH7+WJW, Nainital Rd, Tallital, Nainital, Uttarakhand 263002",
+   "storeShippingAddress": "9FH7+WJW, Nainital Rd, Tallital, Nainital, Uttarakhand 263002"
+ },
+ "financialDetails": {
+   "entityPAN": "CTFPG9319Q",
+   "vendorPAN": "ISAPK7755J",
+   "entityGSTIN": "27AAFCD5862R014",
+   "vendorGSTIN": "27AAFCD5862R013"
+ },
+ "isInterstate": true,
+ "totalQty": 300,
+ "cityId": "4f30407c-6a3c-4a4e-8a3d-652217d4b6cb",
+ "poLineItems": [
+   {
+     "skuCode": "9aaf5ef9-ab69-412c-9af8-1de1f3d0dae9",
+     "materialCode": "25003",
+     "productName": "Test bath body new updated - qwerty",
+     "subCategory": "Soaps",
+     "brandName": "Cadbury Bournvita1",
+     "quantity": 100,
+     "ean": "1458114581",
+     "mrp": 1000,
+     "costPrice": 870,
+     "margin": 13,
+     "dispatchMargin": 0,
+     "outboundMargin": 0,
+     "holdingMargin": 0,
+     "bfdMargin": 0,
+     "hsnCode": "7219723",
+     "hsnText": "Test",
+     "igstPercentage": 0,
+     "cgstPercentage": 0,
+     "sgstPercentage": 0,
+     "cessPercentage": 0,
+     "absoluteCess": 0,
+     "packSize": 10,
+     "totalAmount": 87000,
+     "taxExclusiveCost": 870
+   },
+   {
+     "skuCode": "b15af8f6-5176-4f56-98d6-15119fa5c5da",
+     "materialCode": "25004",
+     "productName": "BUNDLE-TEST7003 - 100g",
+     "subCategory": "Chips \u0026 Crisps",
+     "brandName": "Cadbury Bournvita1",
+     "quantity": 100,
+     "ean": "7476318066136",
+     "mrp": 100,
+     "costPrice": 95,
+     "margin": 5,
+     "dispatchMargin": 0,
+     "outboundMargin": 0,
+     "holdingMargin": 0,
+     "bfdMargin": 0,
+     "hsnCode": "7219723",
+     "hsnText": "Test",
+     "igstPercentage": 0,
+     "cgstPercentage": 0,
+     "sgstPercentage": 0,
+     "cessPercentage": 0,
+     "absoluteCess": 0,
+     "packSize": 100,
+     "totalAmount": 9500,
+     "taxExclusiveCost": 95
+   },
+   {
+     "skuCode": "3cc08886-c827-40dd-bf16-7df36fc311d5",
+     "materialCode": "25007",
+     "productName": "BUNDLE-TEST8484 - 100g",
+     "subCategory": "Chips \u0026 Crisps",
+     "brandName": "Cadbury Bournvita1",
+     "quantity": 100,
+     "ean": "4140548073560",
+     "mrp": 100,
+     "costPrice": 98,
+     "margin": 2,
+     "dispatchMargin": 0,
+     "outboundMargin": 0,
+     "holdingMargin": 0,
+     "bfdMargin": 0,
+     "hsnCode": "7219723",
+     "hsnText": "Test",
+     "igstPercentage": 0,
+     "cgstPercentage": 0,
+     "sgstPercentage": 0,
+     "cessPercentage": 0,
+     "absoluteCess": 0,
+     "packSize": 100,
+     "totalAmount": 9800,
+     "taxExclusiveCost": 98
+   }
+ ]
+}
+
+
+
+
+Test Data 2 
+{
+ "timestamp": "2025-07-30T09:56:35Z",
+ "eventId": "08ff8b36-0b47-4466-83df-a8c6e1428f5f",
+ "eventType": "CreatePO",
+ "code": "P200380",
+ "type": "FMCG",
+ "expiryDate": "2025-12-24T18:30:00Z",
+ "status": "RELEASED",
+ "entityCode": "KIRA",
+ "entityName": "Zepto Private Limited",
+ "vendorCode": "KKT-45129",
+ "vendorName": "TEST heirarchy manav-march-04-03-abhi",
+ "vendorType": "",
+ "terms": "",
+ "toStoreCode": "MI399M",
+ "fromStoreCode": "",
+ "fromStoreName": "",
+ "toStoreName": "TEST-MUM-FARUKHNAGR",
+ "deliveryDate": "2025-12-09T18:30:00Z",
+ "pdfFileName": "64af8624-36f0-4496-9a22-fce0dd060805.pdf",
+ "address": {
+   "storeAddress": "Jhajjar Gurugram,Haryana India-124103",
+   "vendorAddress": "NO.29 SANKEY ROAD BANGALORE Bengaluru (Bangalore) Urban Karnataka 560001",
+   "vendorPinCode": "560001",
+   "storeBillingAddress": "Jhajjar Gurugram,Haryana India-124103",
+   "storeShippingAddress": "Jhajjar Gurugram,Haryana India-124103"
+ },
+ "financialDetails": {
+   "entityPAN": "CTFPG9319Q",
+   "vendorPAN": "ISAPK7755J",
+   "entityGSTIN": "27AAFCD5862R013",
+   "vendorGSTIN": "27AAFCD5862R013"
+ },
+ "isInterstate": true,
+ "totalQty": 10,
+ "cityId": "747f43bf-ba48-4a41-a464-37feab54d280",
+ "poLineItems": [
+   {
+     "skuCode": "d118696f-a824-4213-a252-1dbbb60d5b7b",
+     "materialCode": "25039",
+     "productName": "Axe Body Spray Deodorant Combo Pack - 1000ml",
+     "subCategory": "Fragrances \u0026 Deos",
+     "brandName": "Axe",
+     "quantity": 10,
+     "ean": "8901030819018",
+     "mrp": 100,
+     "costPrice": 63,
+     "margin": 37,
+     "dispatchMargin": 0,
+     "outboundMargin": 0,
+     "holdingMargin": 0,
+     "bfdMargin": 0,
+     "hsnCode": "33072000",
+     "hsnText": "PRE-SHAVE, SHAVING OR AFTER-SHAVE PREPARATIONS, PERSONAL DEODORANTS, BATH PREPARATIONS, DEPILATORIES AND OTHER PERFUMERY, COSMETIC OR TOILET PREPARATIONS, NOT ELSEWHERE SPECIFIED OR INCLUDED, PREPARED ROOM DEODORISERS, WHETHER OR NOT PERFUMED OR HAVING DISINFECTANT PROPERTIES PERSONAL DEODORANTS AND ANTI-PERSPIRANTS",
+     "igstPercentage": 18,
+     "cgstPercentage": 0,
+     "sgstPercentage": 0,
+     "cessPercentage": 0,
+     "absoluteCess": 0,
+     "packSize": 300,
+     "totalAmount": 630,
+     "taxExclusiveCost": 53.389830508474574
+   }
+ ]
+}
