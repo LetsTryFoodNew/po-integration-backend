@@ -345,14 +345,12 @@ async def zepto_proxy(path: str, request: Request):
       POST /api/proxy/zepto/api/v1/external/asn
       PUT  /api/proxy/zepto/api/v1/external/po/{po_number}/amendment
     """
-    env            = os.getenv("ENVIRONMENT", "local")
-    client_id      = os.getenv("ZEPTO_CLIENT_ID", "")
-    client_secret  = os.getenv("ZEPTO_CLIENT_SECRET", "")
-    zepto_base     = (
-        "https://silkroute.zeptonow.dev" if env == "local"
-        else "https://silkroute.zepto.co.in"
-    )
-    target_url = f"{zepto_base}/{path.lstrip('/')}"
+    # Credentials: prefer Render env vars; fall back to headers sent by caller
+    # (ZeptoService in local mode sends them in the request headers)
+    client_id     = os.getenv("ZEPTO_CLIENT_ID", "") or request.headers.get("X-Client-Id", "")
+    client_secret = os.getenv("ZEPTO_CLIENT_SECRET", "") or request.headers.get("X-Client-Secret", "")
+    zepto_base    = "https://silkroute.zeptonow.dev"   # proxy always hits QA host
+    target_url    = f"{zepto_base}/{path.lstrip('/')}"
 
     if request.query_params:
         target_url += f"?{request.query_params}"
@@ -363,12 +361,11 @@ async def zepto_proxy(path: str, request: Request):
         body = None
 
     forward_headers = {
-        "Content-Type":      "application/json",
-        "X-Client-Id":       client_id,
-        "X-Client-Secret":   client_secret,
-        "X-Forwarded-By":    "EDI-Integration-Proxy",
+        "Content-Type":    "application/json",
+        "X-Client-Id":     client_id,
+        "X-Client-Secret": client_secret,
+        "X-Forwarded-By":  "EDI-Integration-Proxy",
     }
-    # Pass through idempotency key if the original request included one
     idempotency_key = request.headers.get("X-Idempotency-Key")
     if idempotency_key:
         forward_headers["X-Idempotency-Key"] = idempotency_key
