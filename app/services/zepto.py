@@ -216,7 +216,7 @@ class ZeptoService:
         key = idempotency_key or str(uuid.uuid4())
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                response = await client.put(url, json=payload, headers=self._headers(key))
+                response = await client.post(url, json=payload, headers=self._headers(key))
                 response.raise_for_status()
                 logger.info("Zepto PO amendment submitted: %s", po_number)
                 return {"success": True, "status_code": response.status_code, "data": response.json()}

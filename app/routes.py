@@ -609,7 +609,7 @@ async def list_zepto_asns(po_code: str, page_size: int = 10, page_number: int = 
     return result
 
 
-@router.put("/zepto/po/{po_number}/amendment", tags=["Zepto API"])
+@router.post("/zepto/po/{po_number}/amendment", tags=["Zepto API"])
 async def request_zepto_po_amendment(po_number: str, payload: dict, idempotency_key: str = None):
     """
     Submit a PO amendment request to Zepto.
