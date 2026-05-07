@@ -184,6 +184,34 @@ class SAPSalesOrder(Base):
     company          = relationship("Company", foreign_keys=[company_id])
 
 
+# ── Zepto ASN Allocation: per-SKU qty tracker (Zepto's list_asns never returns itemDetails) ──
+class ZeptoASNAllocation(Base):
+    """
+    Tracks exactly how many pieces of each SKU were invoiced in every Zepto ASN
+    created via this system.  Zepto's List-ASNs API returns only the total ASN
+    qty — no per-SKU breakdown — so without this table we can't compute
+    remaining qty per SKU and would let users enter amounts that Zepto rejects.
+
+    Lifecycle:
+      - Row inserted when POST /zepto/asn succeeds.
+      - cancelled=True when DELETE /zepto/asn/{asn_number} succeeds.
+      - GET /zepto/po/{po_code}/sku-allocations sums non-cancelled rows per SKU.
+    """
+    __tablename__ = "zepto_asn_allocations"
+
+    id           = Column(Integer, primary_key=True, index=True)
+    asn_number   = Column(String(100), nullable=False, index=True)
+    po_code      = Column(String(50),  nullable=False, index=True)
+    sku_code     = Column(String(100), nullable=False)
+    invoiced_qty = Column(Integer,     nullable=False)
+    cancelled    = Column(Boolean,     default=False)
+    created_at   = Column(DateTime,    default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("asn_number", "sku_code", name="uq_zepto_asn_sku"),
+    )
+
+
 # ── Unmapped SKU Alert: flags unknown partner SKUs for human review ─────────────
 class UnmappedSKUAlert(Base):
     __tablename__ = "unmapped_sku_alerts"

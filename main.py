@@ -39,6 +39,8 @@ app.add_middleware(
         "http://localhost:5173",
         "http://localhost:5174",
         "http://localhost:3000",
+        "http://localhost:3001",
+        "http://localhost:3002",
         RENDER_URL,                      # Allow Render frontend if deployed
         f"{RENDER_URL}".replace("backend", "frontend"),
     ],

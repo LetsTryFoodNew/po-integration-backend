@@ -23,6 +23,7 @@ Key rules from API contract v12:
 """
 
 import httpx
+import json
 import os
 import uuid
 import logging
@@ -47,6 +48,58 @@ class ZeptoService:
             logger.info("ZeptoService: LOCAL mode — routing via Render proxy (%s)", self.render_url)
         else:
             logger.info("ZeptoService: PRODUCTION mode — calling Zepto directly (%s)", self.base_url)
+
+    def _unwrap(self, raw) -> dict:
+        """Strip the Render proxy wrapper {proxied: True, data: <zepto>} if present."""
+        if isinstance(raw, dict) and raw.get("proxied"):
+            inner = raw.get("data")
+            return inner if isinstance(inner, dict) else {}
+        return raw if isinstance(raw, dict) else {}
+
+    @staticmethod
+    def _zepto_message(body) -> str:
+        """
+        Extract a clean, human-readable message from a Zepto error body.
+
+        Zepto error shapes seen in the wild:
+          {"errors": [{"code": 400, "error": "Invalid record. ..."}], "data": null}
+          {"message": "...", "statusCode": 400}
+          "plain string"
+        """
+        if isinstance(body, str):
+            # Try to parse JSON string first
+            try:
+                body = json.loads(body)
+            except (json.JSONDecodeError, ValueError):
+                return body
+        if isinstance(body, dict):
+            errors = body.get("errors")
+            if isinstance(errors, list) and errors:
+                msgs = [e.get("error") or e.get("message", "") for e in errors if isinstance(e, dict)]
+                msgs = [m for m in msgs if m]
+                if msgs:
+                    return "; ".join(msgs)
+            for key in ("message", "error", "detail"):
+                if body.get(key) and isinstance(body[key], str):
+                    return body[key]
+            return json.dumps(body)
+        return str(body)
+
+    def _proxy_error(self, raw) -> Optional[dict]:
+        """
+        Old Render proxy returns HTTP 200 even when Zepto returns 4xx, packing
+        the real status in {proxied: True, status_code: <zepto>, data: <body>}.
+        Detect that here so every caller can surface the real Zepto error.
+        """
+        if isinstance(raw, dict) and raw.get("proxied"):
+            status = raw.get("status_code", 200)
+            if status >= 400:
+                return {
+                    "success":     False,
+                    "status_code": status,
+                    "error":       self._zepto_message(raw.get("data", "")),
+                }
+        return None
 
     def _url(self, path: str) -> str:
         """
@@ -107,12 +160,17 @@ class ZeptoService:
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.get(url, params=params, headers=self._headers())
+                raw = response.json()
+                err = self._proxy_error(raw)
+                if err:
+                    logger.error("Zepto list_po_events (via proxy) HTTP %s: %s", err["status_code"], err["error"])
+                    return err
                 response.raise_for_status()
                 logger.info("Zepto list_po_events: HTTP %s, days=%s", response.status_code, days)
-                return {"success": True, "status_code": response.status_code, "data": response.json()}
+                return {"success": True, "status_code": response.status_code, "data": self._unwrap(raw)}
         except httpx.HTTPStatusError as e:
             logger.error("Zepto list_po_events HTTP %s: %s", e.response.status_code, e.response.text)
-            return {"success": False, "status_code": e.response.status_code, "error": e.response.text}
+            return {"success": False, "status_code": e.response.status_code, "error": self._zepto_message(e.response.text)}
         except Exception as e:
             logger.error("Zepto list_po_events failed: %s", e)
             return {"success": False, "error": str(e)}
@@ -131,20 +189,25 @@ class ZeptoService:
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.post(url, json=payload, headers=self._headers(key))
+                raw = response.json()
+                err = self._proxy_error(raw)
+                if err:
+                    logger.error("Zepto create_asn (via proxy) HTTP %s: %s", err["status_code"], err["error"])
+                    return err
                 response.raise_for_status()
-                data       = response.json()
+                data       = self._unwrap(raw)
                 asn_number = data.get("data", {}).get("asnNumber")
                 po_number  = payload.get("purchaseOrderDetails", {}).get("purchaseOrderNumber")
                 logger.info("Zepto ASN created: %s for PO %s", asn_number, po_number)
                 return {
-                    "success":    True,
+                    "success":     True,
                     "status_code": response.status_code,
                     "data":        data,
                     "asn_number":  asn_number,
                 }
         except httpx.HTTPStatusError as e:
             logger.error("Zepto create_asn HTTP %s: %s", e.response.status_code, e.response.text)
-            return {"success": False, "status_code": e.response.status_code, "error": e.response.text}
+            return {"success": False, "status_code": e.response.status_code, "error": self._zepto_message(e.response.text)}
         except Exception as e:
             logger.error("Zepto create_asn failed: %s", e)
             return {"success": False, "error": str(e)}
@@ -164,12 +227,17 @@ class ZeptoService:
                     params={"asnNumber": asn_number},
                     headers=self._headers(key),
                 )
+                raw = response.json()
+                err = self._proxy_error(raw)
+                if err:
+                    logger.error("Zepto cancel_asn (via proxy) HTTP %s: %s", err["status_code"], err["error"])
+                    return err
                 response.raise_for_status()
                 logger.info("Zepto ASN cancelled: %s", asn_number)
-                return {"success": True, "status_code": response.status_code, "data": response.json()}
+                return {"success": True, "status_code": response.status_code, "data": self._unwrap(raw)}
         except httpx.HTTPStatusError as e:
             logger.error("Zepto cancel_asn HTTP %s: %s", e.response.status_code, e.response.text)
-            return {"success": False, "status_code": e.response.status_code, "error": e.response.text}
+            return {"success": False, "status_code": e.response.status_code, "error": self._zepto_message(e.response.text)}
         except Exception as e:
             logger.error("Zepto cancel_asn failed: %s", e)
             return {"success": False, "error": str(e)}
@@ -191,11 +259,16 @@ class ZeptoService:
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.get(url, params=params, headers=self._headers())
+                raw = response.json()
+                err = self._proxy_error(raw)
+                if err:
+                    logger.error("Zepto list_asns (via proxy) HTTP %s: %s", err["status_code"], err["error"])
+                    return err
                 response.raise_for_status()
-                return {"success": True, "status_code": response.status_code, "data": response.json()}
+                return {"success": True, "status_code": response.status_code, "data": self._unwrap(raw)}
         except httpx.HTTPStatusError as e:
             logger.error("Zepto list_asns HTTP %s: %s", e.response.status_code, e.response.text)
-            return {"success": False, "status_code": e.response.status_code, "error": e.response.text}
+            return {"success": False, "status_code": e.response.status_code, "error": self._zepto_message(e.response.text)}
         except Exception as e:
             logger.error("Zepto list_asns failed: %s", e)
             return {"success": False, "error": str(e)}
@@ -217,12 +290,17 @@ class ZeptoService:
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.post(url, json=payload, headers=self._headers(key))
+                raw = response.json()
+                err = self._proxy_error(raw)
+                if err:
+                    logger.error("Zepto request_po_amendment (via proxy) HTTP %s: %s", err["status_code"], err["error"])
+                    return err
                 response.raise_for_status()
                 logger.info("Zepto PO amendment submitted: %s", po_number)
-                return {"success": True, "status_code": response.status_code, "data": response.json()}
+                return {"success": True, "status_code": response.status_code, "data": self._unwrap(raw)}
         except httpx.HTTPStatusError as e:
             logger.error("Zepto request_po_amendment HTTP %s: %s", e.response.status_code, e.response.text)
-            return {"success": False, "status_code": e.response.status_code, "error": e.response.text}
+            return {"success": False, "status_code": e.response.status_code, "error": self._zepto_message(e.response.text)}
         except Exception as e:
             logger.error("Zepto request_po_amendment failed: %s", e)
             return {"success": False, "error": str(e)}

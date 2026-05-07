@@ -1,7 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, Header
+from fastapi import APIRouter, Depends, HTTPException, Request, Header, Response
+from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app import crud, schemas
+from app.models import ZeptoASNAllocation
 from app.services.blinkit import blinkit_service
 from app.services.zepto import zepto_service
 import base64
@@ -378,16 +380,13 @@ async def zepto_proxy(path: str, request: Request):
                 json=body,
                 headers=forward_headers,
             )
-        return {
-            "proxied":     True,
-            "target_url":  target_url,
-            "status_code": response.status_code,
-            "data": (
-                response.json()
-                if response.headers.get("content-type", "").startswith("application/json")
-                else response.text
-            ),
-        }
+        # Return Zepto's raw response transparently so ZeptoService.response.json()
+        # gets the real Zepto body — keeps the data depth consistent in local + prod.
+        return Response(
+            content=response.content,
+            status_code=response.status_code,
+            media_type=response.headers.get("content-type", "application/json"),
+        )
     except httpx.ConnectError:
         raise HTTPException(502, f"Cannot reach Zepto API at {target_url}")
     except Exception as e:
@@ -574,29 +573,62 @@ async def get_zepto_po_events(
 
 
 @router.post("/zepto/asn", tags=["Zepto API"])
-async def create_zepto_asn(payload: dict, idempotency_key: str = None):
+async def create_zepto_asn(payload: dict, db: Session = Depends(get_db), idempotency_key: str = None):
     """
     Submit an ASN / invoice to Zepto against a PO.
     Returns the Zepto-issued asnNumber — store it for potential cancellation.
-    Payload must match the Zepto ASN creation contract (see API Externalisation Contracts v12).
-    On 5XX, retry with the same idempotency_key.
+    Also persists per-SKU allocations in zepto_asn_allocations so the frontend
+    can compute exact remaining qty per SKU (Zepto's list_asns API never returns
+    item-level breakdowns, so we track this ourselves).
     """
     result = await zepto_service.create_asn(payload, idempotency_key)
     if not result["success"]:
         status = result.get("status_code", 502)
         raise HTTPException(status, result.get("error", "Zepto ASN creation failed"))
+
+    asn_number = result.get("asn_number")
+    po_code    = payload.get("purchaseOrderDetails", {}).get("purchaseOrderNumber")
+    if asn_number and po_code:
+        for item in payload.get("itemDetails", []):
+            sku_code = (
+                item.get("productIdentifier", {})
+                    .get("buyerProductIdentifier", {})
+                    .get("skuCode")
+            )
+            qty = int(
+                item.get("quantity", {})
+                    .get("invoicedQuantity", {})
+                    .get("amount", 0)
+            )
+            if sku_code and qty > 0:
+                db.add(ZeptoASNAllocation(
+                    asn_number=asn_number,
+                    po_code=po_code,
+                    sku_code=sku_code,
+                    invoiced_qty=qty,
+                ))
+        db.commit()
+
     return result
 
 
 @router.delete("/zepto/asn/{asn_number}", tags=["Zepto API"])
-async def cancel_zepto_asn(asn_number: str, idempotency_key: str = None):
+async def cancel_zepto_asn(asn_number: str, db: Session = Depends(get_db), idempotency_key: str = None):
     """
     Cancel an existing Zepto ASN.
+    Marks our local per-SKU allocation rows as cancelled so the remaining-qty
+    computation stays accurate after cancellation.
     To update an ASN: cancel it here, then POST /zepto/asn with a new invoiceNumber.
     """
     result = await zepto_service.cancel_asn(asn_number, idempotency_key)
     if not result["success"]:
         raise HTTPException(result.get("status_code", 502), result.get("error", "Zepto ASN cancellation failed"))
+
+    db.query(ZeptoASNAllocation).filter(
+        ZeptoASNAllocation.asn_number == asn_number
+    ).update({"cancelled": True})
+    db.commit()
+
     return result
 
 
@@ -607,6 +639,63 @@ async def list_zepto_asns(po_code: str, page_size: int = 10, page_number: int = 
     if not result["success"]:
         raise HTTPException(result.get("status_code", 502), result.get("error", "Zepto list ASNs failed"))
     return result
+
+
+@router.get("/zepto/po/{po_number}/sku-allocations", tags=["Zepto API"])
+def get_zepto_sku_allocations(po_number: str, db: Session = Depends(get_db)):
+    """
+    Returns a per-SKU map of how many pieces have already been invoiced in active
+    (non-cancelled) ASNs for this PO — sourced from our own DB, not from Zepto.
+
+    Zepto's List-ASNs API returns only total ASN qty with no per-SKU breakdown.
+    We record the per-SKU quantities ourselves each time POST /zepto/asn succeeds,
+    and clear them on cancellation, so this endpoint is always accurate.
+
+    Response: { "po_code": "P365999", "allocations": { "SKU123": 5, "SKU456": 3 } }
+    """
+    rows = (
+        db.query(ZeptoASNAllocation)
+        .filter(
+            ZeptoASNAllocation.po_code   == po_number,
+            ZeptoASNAllocation.cancelled == False,
+        )
+        .all()
+    )
+    allocations: dict[str, int] = {}
+    for row in rows:
+        allocations[row.sku_code] = allocations.get(row.sku_code, 0) + row.invoiced_qty
+    return {"po_code": po_number, "allocations": allocations}
+
+
+@router.get("/zepto/po/{po_number}/pdf", tags=["Zepto API"])
+async def get_zepto_po_pdf(po_number: str):
+    """
+    Fetch a fresh pre-signed PDF URL for a Zepto PO and redirect the browser to it.
+
+    Pre-signed S3 URLs embed an AWS STS token that expires independently of the
+    URL's own X-Amz-Expires field — sometimes within hours.  Calling this endpoint
+    on every click guarantees a fresh URL, so the browser never hits ExpiredToken.
+    """
+    result = await zepto_service.list_po_events(
+        days=45,
+        po_codes=[po_number],
+        include_line_item_details=False,
+        page_size=1,
+        page_number=1,
+    )
+    if not result["success"]:
+        raise HTTPException(result.get("status_code", 502), result.get("error", "Zepto API error"))
+
+    orders = result.get("data", {}).get("data", {}).get("purchaseOrders", [])
+    if not orders:
+        raise HTTPException(404, f"PO {po_number} not found in Zepto (searched last 45 days)")
+
+    po = orders[0]
+    pdf_url = po.get("expiringUrlForPoPDF") or po.get("expiringPoPdfLink")
+    if not pdf_url:
+        raise HTTPException(404, f"No PDF available for PO {po_number}")
+
+    return RedirectResponse(url=pdf_url, status_code=302)
 
 
 @router.post("/zepto/po/{po_number}/amendment", tags=["Zepto API"])
