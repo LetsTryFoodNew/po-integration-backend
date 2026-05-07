@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, Header, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Header, Response
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from app.database import get_db
@@ -407,49 +407,80 @@ async def zepto_proxy(path: str, request: Request):
 # ══════════════════════════════════════════════════════════════════════════════
 
 @router.post("/webhook/inbound/blinkit/po", tags=["Blinkit Webhook"])
-async def blinkit_po_inbound(request: Request, db: Session = Depends(get_db)):
+async def blinkit_po_inbound(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
     """
     Blinkit pushes PO creation/update events to this endpoint.
-    Share this URL with Blinkit team:
+    Webhook URL to share with Blinkit team:
       https://po-integration-backend.onrender.com/api/webhook/inbound/blinkit/po
 
-    Blinkit's PO flow is INBOUND — there is no pull/list API.
-    POs are stored in webhook_logs and visible in the Blinkit PO Events page.
-    After storing, we ACK back to Blinkit's acknowledgement endpoint.
+    The response body IS the PO acknowledgement — Blinkit reads po_status from it.
+    We immediately return "processing"; a final ACK can be sent later via /blinkit/po-ack.
     """
+    import logging
     from app.models import WebhookLog, WebhookStatus
     from datetime import datetime as dt
 
+    logger = logging.getLogger("edi.blinkit.webhook")
+
+    # ── 1. Parse body (never crash on bad input) ──────────────────────────────
     try:
         body = await request.json()
-    except Exception:
-        raise HTTPException(400, "Invalid JSON body")
+    except Exception as exc:
+        logger.error("Blinkit webhook: JSON parse error: %s", exc)
+        body = {}
 
-    po_number  = body.get("po_number")
-    event_type = body.get("type", "PO_CREATION")
+    po_number  = (body.get("po_number") or "")[:50] or None
+    event_type = (body.get("type") or "PO_CREATION")[:40]
 
-    log = WebhookLog(
-        event_type=f"BLINKIT_{event_type}",
-        source_ip=request.client.host if request.client else None,
-        headers=dict(request.headers),
-        payload=body,
-        po_number=po_number,
-        status=WebhookStatus.PROCESSED,
-    )
-    db.add(log)
-    db.commit()
+    logger.info("Blinkit inbound webhook: po_number=%s type=%s", po_number, event_type)
 
-    # Immediately ACK back to Blinkit (async, non-blocking for the response)
-    import asyncio
-    asyncio.create_task(
-        blinkit_service.acknowledge_po(po_number or "unknown", "processing")
-    )
+    # ── 2. Store in DB (never let a DB error cause a 500 to Blinkit) ──────────
+    try:
+        # Truncate individual header values so they fit in the JSON column
+        safe_headers = {k: v[:500] for k, v in dict(request.headers).items()}
+        log = WebhookLog(
+            event_type=f"BLINKIT_{event_type}"[:50],
+            source_ip=(request.client.host if request.client else None),
+            headers=safe_headers,
+            payload=body,
+            po_number=po_number,
+            status=WebhookStatus.PROCESSED,
+        )
+        db.add(log)
+        db.commit()
+        logger.info("Blinkit PO %s stored in webhook_logs", po_number)
+    except Exception as exc:
+        logger.error("Blinkit webhook: DB write failed: %s", exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        # Continue — don't let a DB failure block the ACK response to Blinkit
 
+    # ── 3. Optional: send final ACK asynchronously after we respond ───────────
+    async def _send_ack():
+        try:
+            await blinkit_service.acknowledge_po(po_number or "unknown", "accepted")
+        except Exception as exc:
+            logger.warning("Blinkit PO ack background send failed: %s", exc)
+
+    background_tasks.add_task(_send_ack)
+
+    # ── 4. Return ACK in Blinkit's expected response format ───────────────────
     return {
         "success":   True,
         "message":   "PO received",
-        "po_number": po_number,
         "timestamp": dt.utcnow().isoformat() + "Z",
+        "data": {
+            "po_status": "processing",
+            "po_number": po_number,
+            "errors":    [],
+            "warnings":  [],
+        },
     }
 
 
