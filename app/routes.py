@@ -270,18 +270,26 @@ def resolve_unmapped_sku_alert(alert_id: int, data: schemas.UnmappedSKUResolve, 
 )
 async def blinkit_proxy(path: str, request: Request):
     """
-    Proxy endpoint — forwards any request to Blinkit API.
+    Proxy endpoint — forwards any request to Blinkit Vendor API.
 
-    LOCAL  : Your Mac → this server (Render static IP) → Blinkit ✅
-    PROD   : This route still works but direct calls are used instead.
+    LOCAL  : Your Mac → this Render server (static IP whitelisted by Blinkit) → Blinkit ✅
+    PROD   : This route is still available but BlinkitService calls Blinkit directly.
 
-    Usage:
-      POST /api/proxy/blinkit/vendor/asn       → Blinkit ASN endpoint
-      POST /api/proxy/blinkit/vendor/po/ack    → Blinkit PO acknowledgement
-      GET  /api/proxy/blinkit/vendor/po/123    → Get PO details
+    Credentials are read from Render env vars first; if not set, the calling service
+    should pass them in request headers (api-key / x-vendor-id) — same pattern as
+    the Zepto proxy. This means the proxy works even before Render env vars are set.
+
+    Usage (called automatically by BlinkitService in local mode):
+      GET  /api/proxy/blinkit/v1/purchase-orders?vendor_id=18309
+      POST /api/proxy/blinkit/v1/asn
+      POST /api/proxy/blinkit/v1/asn/{id}/cancel
     """
-    blinkit_base = os.getenv("BLINKIT_BASE_URL", "https://api.blinkit.com").rstrip("/")
-    api_key      = os.getenv("BLINKIT_API_KEY", "")
+    # Credentials: prefer Render env vars; fall back to headers sent by the caller
+    # (BlinkitService in local mode sends api-key + x-vendor-id in the request headers)
+    api_key   = os.getenv("BLINKIT_API_KEY", "")   or request.headers.get("api-key", "")
+    vendor_id = os.getenv("BLINKIT_VENDOR_ID", "18309") or request.headers.get("x-vendor-id", "18309")
+    # Use the UAT base URL unless overridden on Render
+    blinkit_base = os.getenv("BLINKIT_BASE_URL", "https://api-uat.blinkit.com").rstrip("/")
     target_url   = f"{blinkit_base}/{path.lstrip('/')}"
 
     # Forward query params
@@ -294,10 +302,11 @@ async def blinkit_proxy(path: str, request: Request):
     except Exception:
         body = None
 
-    # Forward all headers except host, add auth
+    # Blinkit uses api-key + x-vendor-id (not Bearer token)
     forward_headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
+        "Content-Type":   "application/json",
+        "api-key":        api_key,
+        "x-vendor-id":    vendor_id,
         "X-Forwarded-By": "EDI-Integration-Proxy",
     }
 
@@ -394,123 +403,97 @@ async def zepto_proxy(path: str, request: Request):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ── BLINKIT API OPERATIONS — Used by your application logic ───────────────────
+# ── BLINKIT API OPERATIONS — Blinkit Vendor Supply API ────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/blinkit/health", tags=["Blinkit API"])
-async def blinkit_health_check():
-    """
-    Test if Blinkit API is reachable.
-    Shows whether routing via Render proxy (local) or directly (production).
-    """
+async def blinkit_health():
+    """Test Blinkit API connectivity and show routing mode."""
     result = await blinkit_service.health_check()
     return {
-        "environment": os.getenv("ENVIRONMENT", "local"),
-        "routing_mode": "via_render_proxy" if os.getenv("ENVIRONMENT", "local") == "local" else "direct_to_blinkit",
-        "render_url": os.getenv("RENDER_URL", "not_set"),
-        "blinkit_base": os.getenv("BLINKIT_BASE_URL", "not_set"),
-        "api_key_set": bool(os.getenv("BLINKIT_API_KEY")),
-        "connectivity": result,
+        "environment":    os.getenv("ENVIRONMENT", "local"),
+        "vendor_id":      os.getenv("BLINKIT_VENDOR_ID", "18309"),
+        "base_url":       blinkit_service.base_url,
+        "api_key_set":    bool(os.getenv("BLINKIT_API_KEY")),
+        "routing_mode":   "via_render_proxy" if os.getenv("ENVIRONMENT", "local") == "local" else "direct_to_blinkit",
+        "connectivity":   result,
     }
 
 
-@router.post("/blinkit/send-asn/{asn_id}", tags=["Blinkit API"])
-async def send_asn_to_blinkit(asn_id: int, db: Session = Depends(get_db)):
+@router.get("/blinkit/pos", tags=["Blinkit API"])
+async def get_blinkit_pos(
+    status: str = None,
+    days: int = 30,
+    page: int = 1,
+    page_size: int = 20,
+):
     """
-    Send an ASN to Blinkit using BlinkitService (smart routing).
-    Works from local Mac AND production server.
+    List Blinkit Purchase Orders for this vendor.
+    status: OPEN | CLOSED | CANCELLED | DRAFT | EXPIRED (omit for all)
     """
-    from app import models as m
-    asn = db.query(m.ASNRecord).filter(m.ASNRecord.id == asn_id).first()
-    if not asn:
-        raise HTTPException(404, "ASN not found")
-
-    po = db.query(m.PurchaseOrder).filter(m.PurchaseOrder.id == asn.po_id).first()
-
-    payload = {
-        "asn_number": asn.asn_number,
-        "po_number": po.po_number if po else None,
-        "sap_order_id": po.sap_order_id if po else None,
-        "shipment_date": asn.shipment_date.isoformat() if asn.shipment_date else None,
-        "expected_delivery": asn.expected_delivery.isoformat() if asn.expected_delivery else None,
-        "carrier": asn.carrier,
-        "tracking_number": asn.tracking_number,
-        "items": asn.items_payload or [],
-    }
-
-    result = await blinkit_service.send_asn(payload)
-    return {
-        "asn_number": asn.asn_number,
-        "blinkit_response": result,
-        "routing": "via_render_proxy" if os.getenv("ENVIRONMENT", "local") == "local" else "direct",
-    }
-
-
-@router.post("/blinkit/acknowledge-po/{po_id}", tags=["Blinkit API"])
-async def acknowledge_po_to_blinkit(po_id: int, db: Session = Depends(get_db)):
-    """
-    Send PO acknowledgement back to Blinkit.
-    Automatically called after inbound webhook PO is processed.
-    """
-    from app import models as m
-    po = db.query(m.PurchaseOrder).filter(m.PurchaseOrder.id == po_id).first()
-    if not po:
-        raise HTTPException(404, "PO not found")
-
-    # Map internal status to Blinkit status
-    status_map = {
-        "STOCK_AVAILABLE": "ACCEPTED",
-        "STOCK_PARTIAL":   "PARTIAL",
-        "OUT_OF_STOCK":    "REJECTED",
-        "CONFIRMED":       "ACCEPTED",
-    }
-    blinkit_status = status_map.get(po.status.value, "ACCEPTED")
-
-    result = await blinkit_service.send_po_acknowledgement(
-        po_number=po.po_number,
-        sap_order_id=po.sap_order_id or "",
-        status=blinkit_status,
+    result = await blinkit_service.list_purchase_orders(
+        status=status, page=page, page_size=page_size, days=days,
     )
-    return {
-        "po_number": po.po_number,
-        "status_sent": blinkit_status,
-        "blinkit_response": result,
-    }
+    if not result["success"]:
+        raise HTTPException(result.get("status_code", 502), result.get("error", "Blinkit API error"))
+    return result
 
 
-@router.get("/blinkit/pending-pos", tags=["Blinkit API"])
-async def get_blinkit_pending_pos():
+@router.get("/blinkit/pos/{po_number}", tags=["Blinkit API"])
+async def get_blinkit_po(po_number: str):
+    """Fetch full details and line items for a specific Blinkit PO."""
+    result = await blinkit_service.get_po_details(po_number)
+    if not result["success"]:
+        raise HTTPException(result.get("status_code", 502), result.get("error", "Blinkit API error"))
+    return result
+
+
+@router.post("/blinkit/asn", tags=["Blinkit API"])
+async def create_blinkit_asn(payload: dict, idempotency_key: str = None):
     """
-    Pull pending POs from Blinkit (poll mode).
-    Use this if Blinkit sends POs by pull instead of webhook push.
+    Submit an ASN/invoice to Blinkit against a PO.
+    Required: purchaseOrderId, vendorId, invoiceNumber, invoiceDate, items[].
+    Returns asnId — store for cancellation reference.
     """
-    result = await blinkit_service.get_pending_pos()
+    result = await blinkit_service.create_asn(payload, idempotency_key)
+    if not result["success"]:
+        raise HTTPException(result.get("status_code", 502), result.get("error", "Blinkit ASN creation failed"))
+    return result
+
+
+@router.get("/blinkit/asn", tags=["Blinkit API"])
+async def list_blinkit_asns(po_number: str, page: int = 1, page_size: int = 20):
+    """Fetch all ASNs submitted against a given Blinkit PO number/ID."""
+    result = await blinkit_service.list_asns(po_number, page=page, page_size=page_size)
+    if not result["success"]:
+        raise HTTPException(result.get("status_code", 502), result.get("error", "Blinkit list ASNs failed"))
+    return result
+
+
+@router.delete("/blinkit/asn/{asn_id}", tags=["Blinkit API"])
+async def cancel_blinkit_asn(asn_id: str, reason: str = "VENDOR_REQUEST"):
+    """
+    Cancel a Blinkit ASN by its asnId.
+    Blinkit has no update API — cancel then re-submit with a new invoiceNumber.
+    """
+    result = await blinkit_service.cancel_asn(asn_id, reason)
+    if not result["success"]:
+        raise HTTPException(result.get("status_code", 502), result.get("error", "Blinkit ASN cancellation failed"))
     return result
 
 
 @router.get("/blinkit/connection-info", tags=["Blinkit API"])
 def blinkit_connection_info():
-    """
-    Show current Blinkit routing configuration.
-    Use this to verify your setup before sharing with Blinkit team.
-    """
+    """Show current Blinkit routing and credential configuration."""
     env = os.getenv("ENVIRONMENT", "local")
     render_url = os.getenv("RENDER_URL", "NOT SET — deploy to Render first")
-    api_key = os.getenv("BLINKIT_API_KEY", "")
-
     return {
-        "environment": env,
-        "routing_mode": "Local Mac → Render Proxy → Blinkit" if env == "local" else "Render Server → Blinkit (Direct)",
-        "your_static_ip_source": "Render.com outbound IP" if env == "production" else "Will use Render's IP via proxy",
-        "render_server_url": render_url,
-        "blinkit_api_key_configured": bool(api_key),
-        "inbound_webhook_url": f"{render_url}/api/webhook/inbound/po",
-        "what_to_send_blinkit_team": {
-            "webhook_endpoint": f"{render_url}/api/webhook/inbound/po",
-            "auth_type": "Basic Auth",
-            "username": "edi_vendor",
-            "note": "Get static IP from Render dashboard → Settings → Outbound IP"
-        }
+        "environment":        env,
+        "vendor_id":          os.getenv("BLINKIT_VENDOR_ID", "18309"),
+        "base_url":           blinkit_service.base_url,
+        "api_key_configured": bool(os.getenv("BLINKIT_API_KEY")),
+        "routing":            "Local Mac → Render Proxy → Blinkit" if env == "local" else "Render → Blinkit Direct",
+        "render_url":         render_url,
     }
 
 
