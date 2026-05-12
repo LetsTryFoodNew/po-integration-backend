@@ -258,6 +258,27 @@ def resolve_unmapped_sku_alert(alert_id: int, data: schemas.UnmappedSKUResolve, 
     return {"message": "Alert resolved and mapping created", "alert_id": alert_id}
 
 
+# ── Blinkit DB debug (temporary) ─────────────────────────────────────────────
+@router.post("/blinkit/debug-db-write", tags=["Blinkit API"])
+def blinkit_debug_db(db: Session = Depends(get_db)):
+    """Temporary: test whether a WebhookLog row can be written to this DB."""
+    from app.models import WebhookLog, WebhookStatus
+    try:
+        log = WebhookLog(
+            event_type="BLINKIT_TEST",
+            source_ip="debug",
+            payload={"test": True},
+            po_number="DEBUG-001",
+            status=WebhookStatus.PENDING,
+        )
+        db.add(log)
+        db.commit()
+        return {"ok": True, "id": log.id}
+    except Exception as exc:
+        db.rollback()
+        return {"ok": False, "error": str(exc), "type": type(exc).__name__}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # ── BLINKIT PROXY — Local Mac calls this → Render (static IP) → Blinkit ──────
 # ══════════════════════════════════════════════════════════════════════════════
