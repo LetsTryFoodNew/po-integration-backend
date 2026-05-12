@@ -256,6 +256,29 @@ class UnmappedSKUResolve(BaseModel):
     product_id: int
     resolution_notes: Optional[str] = None
 
+# --- Email PO ---
+class EmailPOTest(BaseModel):
+    """Used by POST /api/email/test to simulate an inbound email"""
+    sender_email: str
+    subject: str
+    body_text: str
+    body_html: Optional[str] = None
+
+class EmailPOLogOut(BaseModel):
+    id: int
+    sender_email: Optional[str]
+    subject: Optional[str]
+    parse_status: str
+    po_number: Optional[str]
+    partner_code: Optional[str]
+    parsed_data: Optional[Any]
+    po_id: Optional[int]
+    error_message: Optional[str]
+    created_at: datetime
+    class Config:
+        from_attributes = True
+
+
 # --- Universal PO (standardized internal format) ---
 class UniversalPOOut(BaseModel):
     universal_po_number:    str

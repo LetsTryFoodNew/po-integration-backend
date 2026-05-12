@@ -226,3 +226,34 @@ class UnmappedSKUAlert(Base):
     resolution_notes     = Column(Text, nullable=True)
     created_at           = Column(DateTime, default=datetime.utcnow)
     updated_at           = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# ── Email PO Log: every PO that arrives via email ──────────────────────────────
+class EmailParseStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    PARSED  = "PARSED"
+    FAILED  = "FAILED"
+
+class EmailPOLog(Base):
+    """
+    Stores every inbound email that contains (or might contain) a Purchase Order.
+    Claude AI parses the email body to extract PO details.
+    On success, a PurchaseOrder row is created with source='EMAIL'.
+    """
+    __tablename__ = "email_po_logs"
+
+    id             = Column(Integer, primary_key=True, index=True)
+    sender_email   = Column(String(200), nullable=True)
+    subject        = Column(String(500), nullable=True)
+    body_text      = Column(Text, nullable=True)
+    body_html      = Column(Text, nullable=True)
+    parse_status   = Column(Enum(EmailParseStatus), default=EmailParseStatus.PENDING)
+    po_number      = Column(String(50), nullable=True, index=True)
+    partner_code   = Column(String(50), nullable=True)
+    parsed_data    = Column(JSON, nullable=True)   # Claude's extracted PO structure
+    po_id          = Column(Integer, ForeignKey("purchase_orders.id"), nullable=True)
+    error_message  = Column(Text, nullable=True)
+    raw_payload    = Column(JSON, nullable=True)   # raw webhook body from email provider
+    created_at     = Column(DateTime, default=datetime.utcnow)
+
+    purchase_order = relationship("PurchaseOrder", foreign_keys=[po_id])
