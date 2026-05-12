@@ -524,7 +524,7 @@ async def blinkit_health(request: Request):
 
 
 @router.get("/blinkit/pos", tags=["Blinkit API"])
-def get_blinkit_pos(db: Session = Depends(get_db)):
+def get_blinkit_pos(request: Request, db: Session = Depends(get_db)):
     """
     Return Blinkit POs received via inbound webhook (stored in our DB).
     Blinkit PUSHES POs to us — there is no pull/list API.
@@ -535,7 +535,11 @@ def get_blinkit_pos(db: Session = Depends(get_db)):
 
     logs = (
         db.query(WebhookLog)
-        .filter(WebhookLog.event_type.like("BLINKIT_%"))
+        .filter(
+            WebhookLog.event_type.like("BLINKIT_%"),
+            WebhookLog.event_type != "BLINKIT_TEST",   # exclude debug entries
+            WebhookLog.po_number.isnot(None),
+        )
         .order_by(WebhookLog.created_at.desc())
         .limit(200)
         .all()
@@ -576,7 +580,7 @@ def get_blinkit_pos(db: Session = Depends(get_db)):
             "receivedAt":      log.created_at.isoformat() if log.created_at else None,
         })
 
-    render_url = os.getenv("RENDER_URL", "")
+    server_url = str(request.base_url).rstrip("/")
     return {
         "success": True,
         "data": {
@@ -584,7 +588,7 @@ def get_blinkit_pos(db: Session = Depends(get_db)):
             "hasNext":        False,
             "source":         "inbound_webhook",
             "total":          len(pos),
-            "webhook_url":    f"{render_url}/api/webhook/inbound/blinkit/po",
+            "webhook_url":    f"{server_url}/api/webhook/inbound/blinkit/po",
         },
     }
 
