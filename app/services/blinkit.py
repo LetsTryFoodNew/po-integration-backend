@@ -49,16 +49,16 @@ class BlinkitService:
 
     def _url(self, path: str) -> str:
         """
-        LOCAL      → https://po-integration-backend.onrender.com/api/proxy/blinkit/webhook/public/v1/...
-        PRODUCTION → https://dev.partnersbiz.com/webhook/public/v1/...
+        LOCAL (with RENDER_URL set) → Render proxy → Blinkit
+        Otherwise                   → Blinkit directly
         """
         path = path.lstrip("/")
-        if self.env == "local":
+        if self.env == "local" and self.render_url:
             url = f"{self.render_url}/api/proxy/blinkit/{path}"
             logger.debug("BlinkitService [LOCAL] via Render: %s", url)
         else:
             url = f"{self.base_url}/{path}"
-            logger.debug("BlinkitService [PROD] direct: %s", url)
+            logger.debug("BlinkitService [DIRECT] %s", url)
         return url
 
     def _headers(self, idempotency_key: Optional[str] = None) -> dict:

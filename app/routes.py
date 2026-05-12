@@ -440,19 +440,16 @@ async def blinkit_po_inbound(
 
     # ── 2. Store in DB (never let a DB error cause a 500 to Blinkit) ──────────
     try:
-        # Truncate individual header values so they fit in the JSON column
-        safe_headers = {k: v[:500] for k, v in dict(request.headers).items()}
         log = WebhookLog(
             event_type=f"BLINKIT_{event_type}"[:50],
             source_ip=(request.client.host if request.client else None),
-            headers=safe_headers,
             payload=body,
             po_number=po_number,
-            status=WebhookStatus.PROCESSED,
+            status=WebhookStatus.PENDING,   # PENDING is safe — always in the DB enum
         )
         db.add(log)
         db.commit()
-        logger.info("Blinkit PO %s stored in webhook_logs", po_number)
+        logger.info("Blinkit PO %s stored in webhook_logs (id=%s)", po_number, log.id)
     except Exception as exc:
         logger.error("Blinkit webhook: DB write failed: %s", exc)
         try:
@@ -489,11 +486,11 @@ async def blinkit_po_inbound(
 # ══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/blinkit/health", tags=["Blinkit API"])
-async def blinkit_health():
+async def blinkit_health(request: Request):
     """Test connectivity to Blinkit's partnersbiz.com (testing: dev.partnersbiz.com)."""
     result = await blinkit_service.health_check()
     env = os.getenv("ENVIRONMENT", "local")
-    render_url = os.getenv("RENDER_URL", "")
+    server_url = str(request.base_url).rstrip("/")
     return {
         "environment":  env,
         "vendor_id":    os.getenv("BLINKIT_VENDOR_ID", "18309"),
@@ -501,7 +498,7 @@ async def blinkit_health():
         "api_key_set":  bool(os.getenv("BLINKIT_API_KEY")),
         "routing_mode": "via_render_proxy" if env == "local" else "direct",
         "connectivity": result,
-        "webhook_url":  f"{render_url}/api/webhook/inbound/blinkit/po" if render_url else "deploy to Render first",
+        "webhook_url":  f"{server_url}/api/webhook/inbound/blinkit/po",
     }
 
 
@@ -860,4 +857,194 @@ async def request_zepto_po_amendment(po_number: str, payload: dict, idempotency_
     result = await zepto_service.request_po_amendment(po_number, payload, idempotency_key)
     if not result["success"]:
         raise HTTPException(result.get("status_code", 502), result.get("error", "Zepto amendment request failed"))
+    return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ── EMAIL PO LAYER — ingest Purchase Orders that arrive via email ──────────────
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Shared processor — also used by the Gmail poller
+from app.services.po_processor import process_email_log as _process_email_log
+
+
+@router.post("/email/inbound", tags=["Email PO"])
+async def email_inbound(request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """
+    Receive an inbound email from SendGrid Inbound Parse, Mailgun, or Postmark.
+
+    All three providers POST to a webhook URL — this endpoint accepts any of:
+      • SendGrid: multipart/form-data  (fields: from, subject, text, html)
+      • Mailgun:  application/json     (fields: sender, subject, body-plain, body-html)
+      • Postmark: application/json     (fields: From, Subject, TextBody, HtmlBody)
+      • Manual:   application/json     (fields: sender_email, subject, body_text, body_html)
+
+    Configure your email provider's inbound route to POST to:
+      https://po-integration-backend.onrender.com/api/email/inbound
+
+    For Gmail / custom mail: forward the email to a SendGrid inbound address
+    that webhooks here, or use a service like Zapier.
+    """
+    import logging as lg
+    from app.models import EmailPOLog, EmailParseStatus
+
+    logger_e = lg.getLogger("edi.email.inbound")
+
+    content_type = request.headers.get("content-type", "")
+    sender = subject = body_text = body_html = ""
+
+    try:
+        if "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
+            form = await request.form()
+            sender     = str(form.get("from") or form.get("sender") or "")
+            subject    = str(form.get("subject") or "")
+            body_text  = str(form.get("text") or form.get("body-plain") or "")
+            body_html  = str(form.get("html") or form.get("body-html") or "")
+        else:
+            body = await request.json()
+            # Support SendGrid JSON, Mailgun, Postmark, and our own test schema
+            sender    = (body.get("from") or body.get("sender") or body.get("From") or body.get("sender_email") or "")
+            subject   = (body.get("subject") or body.get("Subject") or "")
+            body_text = (body.get("text") or body.get("body-plain") or body.get("TextBody") or body.get("body_text") or "")
+            body_html = (body.get("html") or body.get("body-html") or body.get("HtmlBody") or body.get("body_html") or "")
+    except Exception as exc:
+        logger_e.error("Email inbound parse error: %s", exc)
+        return {"status": "error", "message": "Could not parse request body"}
+
+    logger_e.info("Email inbound: from=%s subject=%s", sender[:60], subject[:80])
+
+    log = EmailPOLog(
+        sender_email = sender[:200] if sender else None,
+        subject      = subject[:500] if subject else None,
+        body_text    = body_text or None,
+        body_html    = body_html or None,
+        parse_status = EmailParseStatus.PENDING,
+        raw_payload  = {"content_type": content_type},
+    )
+    db.add(log)
+    db.commit()
+    db.refresh(log)
+
+    # Process in background so we respond to the email provider immediately
+    def _bg_process(log_id: int):
+        from app.database import SessionLocal
+        from app.services.po_processor import process_email_log
+        bg_db = SessionLocal()
+        try:
+            process_email_log(bg_db, log_id)
+        finally:
+            bg_db.close()
+
+    background_tasks.add_task(_bg_process, log.id)
+
+    return {
+        "status":   "received",
+        "message":  "Email queued for PO parsing",
+        "log_id":   log.id,
+        "subject":  subject[:80],
+    }
+
+
+@router.post("/email/test", tags=["Email PO"], response_model=schemas.EmailPOLogOut)
+async def test_email_po(payload: schemas.EmailPOTest, db: Session = Depends(get_db)):
+    """
+    Simulate an inbound email PO for testing — parses synchronously and returns result.
+    Useful for testing Claude parsing without a real email provider.
+    """
+    from app.models import EmailPOLog, EmailParseStatus
+
+    log = EmailPOLog(
+        sender_email = payload.sender_email,
+        subject      = payload.subject,
+        body_text    = payload.body_text,
+        body_html    = payload.body_html,
+        parse_status = EmailParseStatus.PENDING,
+        raw_payload  = {"source": "test_endpoint"},
+    )
+    db.add(log)
+    db.commit()
+    db.refresh(log)
+
+    _process_email_log(db, log.id)
+    db.refresh(log)
+    return log
+
+
+@router.get("/email/pos", tags=["Email PO"], response_model=list[schemas.EmailPOLogOut])
+def list_email_pos(
+    parse_status: str = None,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    """List all emails received with PO data — filtered by parse_status if provided."""
+    from app.models import EmailPOLog
+
+    q = db.query(EmailPOLog)
+    if parse_status:
+        q = q.filter(EmailPOLog.parse_status == parse_status.upper())
+    return q.order_by(EmailPOLog.created_at.desc()).limit(limit).all()
+
+
+@router.post("/email/pos/{log_id}/reprocess", tags=["Email PO"], response_model=schemas.EmailPOLogOut)
+def reprocess_email_po(log_id: int, db: Session = Depends(get_db)):
+    """
+    Manually re-trigger Claude parsing for a PENDING or FAILED email PO.
+    Useful when the ANTHROPIC_API_KEY was not yet configured at ingest time.
+    """
+    from app.models import EmailPOLog
+
+    log = db.query(EmailPOLog).filter(EmailPOLog.id == log_id).first()
+    if not log:
+        raise HTTPException(404, "Email log not found")
+    if log.parse_status == "PARSED" and log.po_id:
+        raise HTTPException(400, "Email already parsed successfully — PO already created")
+
+    _process_email_log(db, log_id)
+    db.refresh(log)
+    return log
+
+
+@router.get("/email/pos/{log_id}", tags=["Email PO"], response_model=schemas.EmailPOLogOut)
+def get_email_po(log_id: int, db: Session = Depends(get_db)):
+    """Get a single email PO log entry."""
+    from app.models import EmailPOLog
+
+    log = db.query(EmailPOLog).filter(EmailPOLog.id == log_id).first()
+    if not log:
+        raise HTTPException(404, "Email log not found")
+    return log
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ── GMAIL POLLER — pull POs directly from Gmail labels ────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/email/gmail-status", tags=["Email PO"])
+def gmail_status():
+    """
+    Test Gmail IMAP connectivity and return the list of labels visible in the inbox.
+    Uses GMAIL_ADDRESS + GMAIL_APP_PASSWORD from .env.
+    """
+    from app.services.gmail_poller import test_connection
+    return test_connection()
+
+
+@router.post("/email/poll-gmail", tags=["Email PO"])
+def poll_gmail(
+    days_back:     int = 30,
+    max_per_label: int = 50,
+    db: Session = Depends(get_db),
+):
+    """
+    Poll all configured Gmail labels and import new PO emails.
+
+    - days_back:     How many calendar days back to search (default 30)
+    - max_per_label: Max emails to import per label per run (default 50)
+
+    Already-imported emails are skipped automatically (deduplication by Gmail Message-ID).
+    Each new email is passed through Claude AI to extract PO details,
+    then a PurchaseOrder is created in the system with source='EMAIL'.
+    """
+    from app.services.gmail_poller import poll_all_labels
+    result = poll_all_labels(db, days_back=days_back, max_per_label=max_per_label)
     return result
