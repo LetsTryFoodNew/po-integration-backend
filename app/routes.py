@@ -559,6 +559,7 @@ def get_blinkit_pos(request: Request, db: Session = Depends(get_db)):
             "totalAmount":     details.get("total_amount", 0),
             "warehouseName":   details.get("buyer_details", {}).get("name"),
             "warehouseCode":   str(details.get("outlet_id", "")),
+            "buyerGstin":      details.get("buyer_details", {}).get("gstin", ""),
             "items":           items,
             "receivedAt":      log.created_at.isoformat() if log.created_at else None,
         })
