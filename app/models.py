@@ -184,6 +184,35 @@ class SAPSalesOrder(Base):
     company          = relationship("Company", foreign_keys=[company_id])
 
 
+# ── Blinkit ASN Allocation: per-item qty tracker (Blinkit has no List ASNs API) ──────────────
+class BlinkitASNAllocation(Base):
+    """
+    Tracks how many units of each item were invoiced in every Blinkit ASN
+    created via this system. Blinkit has no List-ASNs API, so without this
+    table we cannot compute remaining qty and would allow over-invoicing.
+
+    Lifecycle:
+      - Row inserted when POST /blinkit/asn succeeds.
+      - cancelled=True if ASN is voided (future: if Blinkit adds cancel API).
+      - GET /blinkit/po/{po_number}/sku-allocations sums non-cancelled rows.
+    """
+    __tablename__ = "blinkit_asn_allocations"
+
+    id           = Column(Integer, primary_key=True, index=True)
+    asn_id       = Column(String(100), nullable=False, index=True)
+    po_number    = Column(String(50),  nullable=False, index=True)
+    item_id      = Column(String(100), nullable=False)
+    sku_code     = Column(String(100), nullable=True)
+    invoice_number = Column(String(100), nullable=True)
+    invoiced_qty = Column(Integer,     nullable=False)
+    cancelled    = Column(Boolean,     default=False)
+    created_at   = Column(DateTime,    default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("asn_id", "item_id", name="uq_blinkit_asn_item"),
+    )
+
+
 # ── Zepto ASN Allocation: per-SKU qty tracker (Zepto's list_asns never returns itemDetails) ──
 class ZeptoASNAllocation(Base):
     """

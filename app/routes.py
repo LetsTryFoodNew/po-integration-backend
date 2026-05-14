@@ -612,35 +612,89 @@ def get_blinkit_po(po_number: str, db: Session = Depends(get_db)):
 
 
 @router.post("/blinkit/asn", tags=["Blinkit API"])
-async def create_blinkit_asn(payload: dict, idempotency_key: str = None):
+async def create_blinkit_asn(payload: dict, db: Session = Depends(get_db), idempotency_key: str = None):
     """
-    Submit an ASN/invoice to Blinkit.
-    Endpoint (testing): POST https://dev.partnersbiz.com/webhook/public/v1/asn
-
-    Required fields: po_number, invoice_number, invoice_date, delivery_date,
-    supplier_details, buyer_details, shipment_details, items[].
-    Returns asn_id — store it for reference.
+    Submit an ASN/invoice to Blinkit and persist per-item allocations locally.
+    Blinkit has no List-ASNs API so we track qty ourselves to compute remaining.
     """
     result = await blinkit_service.create_asn(payload, idempotency_key)
     if not result["success"]:
         raise HTTPException(result.get("status_code", 502), result.get("error", "Blinkit ASN creation failed"))
+
+    from app.models import BlinkitASNAllocation
+    asn_id         = result.get("asn_id") or result.get("data", {}).get("asn_id")
+    po_number      = payload.get("po_number")
+    invoice_number = payload.get("invoice_number")
+    if asn_id and po_number:
+        for item in payload.get("items", []):
+            item_id = str(item.get("item_id", ""))
+            qty     = int(item.get("quantity", 0))
+            if item_id and qty > 0:
+                try:
+                    db.add(BlinkitASNAllocation(
+                        asn_id=asn_id,
+                        po_number=po_number,
+                        item_id=item_id,
+                        sku_code=item.get("sku_code", ""),
+                        invoice_number=invoice_number,
+                        invoiced_qty=qty,
+                    ))
+                except Exception:
+                    pass
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+
     return result
 
 
 @router.get("/blinkit/asn", tags=["Blinkit API"])
-def list_blinkit_asns(po_number: str = None, page: int = 1, page_size: int = 20):
+def list_blinkit_asns(po_number: str = None, db: Session = Depends(get_db)):
+    """Return locally-tracked Blinkit ASNs. Blinkit has no List-ASNs API."""
+    from app.models import BlinkitASNAllocation
+    q = db.query(BlinkitASNAllocation).filter(BlinkitASNAllocation.cancelled == False)
+    if po_number:
+        q = q.filter(BlinkitASNAllocation.po_number == po_number)
+    rows = q.order_by(BlinkitASNAllocation.created_at.desc()).all()
+
+    asns: dict = {}
+    for row in rows:
+        if row.asn_id not in asns:
+            asns[row.asn_id] = {
+                "asn_id":         row.asn_id,
+                "po_number":      row.po_number,
+                "invoice_number": row.invoice_number,
+                "created_at":     row.created_at.isoformat() if row.created_at else None,
+                "total_qty":      0,
+                "items":          [],
+            }
+        asns[row.asn_id]["items"].append({
+            "item_id":     row.item_id,
+            "sku_code":    row.sku_code,
+            "invoiced_qty": row.invoiced_qty,
+        })
+        asns[row.asn_id]["total_qty"] += row.invoiced_qty
+
+    return {"success": True, "data": {"asns": list(asns.values()), "hasNext": False}}
+
+
+@router.get("/blinkit/po/{po_number}/sku-allocations", tags=["Blinkit API"])
+def get_blinkit_sku_allocations(po_number: str, db: Session = Depends(get_db)):
     """
-    Blinkit does not provide a List-ASNs API.
-    Returns empty — track submitted ASNs locally using the asn_id from create responses.
+    Per-item_id map of already-invoiced quantities for a Blinkit PO.
+    Sourced from our own DB — not from Blinkit (they have no such API).
+    Response: { "po_number": "...", "allocations": { "item_id": qty } }
     """
-    return {
-        "success": True,
-        "data": {
-            "asns":    [],
-            "hasNext": False,
-            "note":    "Blinkit has no List ASNs API. Track asn_id from create responses.",
-        },
-    }
+    from app.models import BlinkitASNAllocation
+    rows = db.query(BlinkitASNAllocation).filter(
+        BlinkitASNAllocation.po_number == po_number,
+        BlinkitASNAllocation.cancelled == False,
+    ).all()
+    allocations: dict[str, int] = {}
+    for row in rows:
+        allocations[row.item_id] = allocations.get(row.item_id, 0) + row.invoiced_qty
+    return {"po_number": po_number, "allocations": allocations}
 
 
 @router.post("/blinkit/po-ack", tags=["Blinkit API"])
