@@ -533,7 +533,7 @@ def get_blinkit_pos(request: Request, db: Session = Depends(get_db)):
         details = payload.get("details", {})
         items = [
             {
-                "productId":    item.get("item_id"),
+                "productId":    str(item.get("item_id", "")),
                 "skuCode":      item.get("sku_code", ""),
                 "productName":  item.get("name", ""),
                 "requestedQty": item.get("units_ordered", 0),
@@ -596,7 +596,7 @@ def get_blinkit_po(po_number: str, db: Session = Depends(get_db)):
     details = payload.get("details", {})
     items = [
         {
-            "productId":    item.get("item_id"),
+            "productId":    str(item.get("item_id", "")),
             "skuCode":      item.get("sku_code", ""),
             "productName":  item.get("name", ""),
             "requestedQty": item.get("units_ordered", 0),
