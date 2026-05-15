@@ -554,6 +554,9 @@ def get_blinkit_pos(request: Request, db: Session = Depends(get_db)):
             "igstRate":     igst or 0,
         }
 
+    from datetime import datetime as _dt
+    _now = _dt.utcnow().isoformat()
+
     pos = []
     for log in seen.values():
         payload = log.payload or {}
@@ -561,11 +564,22 @@ def get_blinkit_pos(request: Request, db: Session = Depends(get_db)):
         buyer   = details.get("buyer_details", {}) or {}
         dest    = buyer.get("destination_address", {}) or {}
         items   = [_build_po_item(i) for i in details.get("item_data", [])]
+
+        event_type = payload.get("type", "PO_CREATION")
+        expiry_date = details.get("expiry_date") or ""
+        # Derive PO status: CANCELLED if event says so, EXPIRED if past expiry, else RELEASED
+        if "CANCEL" in event_type.upper():
+            po_status = "CANCELLED"
+        elif expiry_date and expiry_date[:19] < _now[:19]:
+            po_status = "EXPIRED"
+        else:
+            po_status = "RELEASED"
+
         pos.append({
             "purchaseOrderId": payload.get("po_number") or log.po_number,
             "poCode":          payload.get("po_number") or log.po_number,
-            "status":          "RELEASED",
-            "eventType":       payload.get("type", "PO_CREATION"),
+            "status":          po_status,
+            "eventType":       event_type,
             "deliveryDate":    details.get("delivery_date"),
             "expiryDate":      details.get("expiry_date"),
             "issueDate":       details.get("issue_date"),
@@ -719,9 +733,9 @@ def list_blinkit_asns(po_number: str = None, db: Session = Depends(get_db)):
 def cancel_blinkit_asn_local(asn_id: str, db: Session = Depends(get_db)):
     """
     Mark a locally-tracked Blinkit ASN as cancelled (local DB only).
-    Blinkit does NOT have a Cancel ASN API — this only frees up the allocated qty
-    in our tracking table so you can re-submit.  If the physical shipment is already
-    in transit, contact Blinkit directly to recall it.
+    Blinkit has NO Cancel ASN API — this only frees allocated qty in our
+    tracking table so you can re-submit against the same PO.
+    Always returns 200. If the ASN wasn't tracked locally, success=False with a note.
     """
     from app.models import BlinkitASNAllocation
     rows = (
@@ -730,7 +744,16 @@ def cancel_blinkit_asn_local(asn_id: str, db: Session = Depends(get_db)):
         .all()
     )
     if not rows:
-        raise HTTPException(404, f"No active local tracking found for ASN '{asn_id}'")
+        return {
+            "success":        False,
+            "asn_id":         asn_id,
+            "rows_cancelled": 0,
+            "message":        (
+                f"ASN '{asn_id}' is not in local tracking — it was submitted before "
+                "local tracking was enabled, or is already cancelled. "
+                "Contact Blinkit directly if the physical shipment needs to be recalled."
+            ),
+        }
     for row in rows:
         row.cancelled = True
     db.commit()
@@ -739,8 +762,8 @@ def cancel_blinkit_asn_local(asn_id: str, db: Session = Depends(get_db)):
         "asn_id":         asn_id,
         "rows_cancelled": len(rows),
         "message":        (
-            f"ASN {asn_id} marked cancelled in local DB — allocated qty released. "
-            "Note: Blinkit has no cancel API. Contact Blinkit if shipment is already in transit."
+            f"ASN {asn_id} cancelled in local DB — {len(rows)} item(s) released. "
+            "Blinkit has no cancel API; contact them if shipment is already in transit."
         ),
     }
 
