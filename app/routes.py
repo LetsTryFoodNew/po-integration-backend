@@ -519,35 +519,48 @@ def get_blinkit_pos(request: Request, db: Session = Depends(get_db)):
             WebhookLog.event_type.like("BLINKIT_%"),
             WebhookLog.event_type != "BLINKIT_TEST",
             WebhookLog.po_number.isnot(None),
-            ~WebhookLog.po_number.like("TEST%"),   # exclude test/dummy POs
+            ~WebhookLog.po_number.like("TEST%"),
             ~WebhookLog.po_number.like("DEBUG%"),
         )
         .order_by(WebhookLog.created_at.desc())
-        .limit(200)
+        .limit(500)
         .all()
     )
 
-    pos = []
+    # Deduplicate by po_number — keep only the latest event per PO
+    seen: dict = {}
     for log in logs:
+        pn = log.po_number or ""
+        if pn not in seen:
+            seen[pn] = log
+
+    def _build_po_item(item: dict) -> dict:
+        tax = item.get("tax_details", {}) or {}
+        igst = tax.get("igst_percentage")
+        cgst = tax.get("cgst_percentage", 0) or 0
+        sgst = tax.get("sgst_percentage", 0) or 0
+        return {
+            "productId":    str(item.get("item_id", "")),
+            "skuCode":      item.get("sku_code", ""),
+            "upc":          item.get("upc", ""),
+            "productName":  item.get("name", ""),
+            "requestedQty": item.get("units_ordered", 0),
+            "rate":         item.get("basic_price", 0),
+            "mrp":          item.get("mrp", 0),
+            "hsnCode":      item.get("hsn_code"),        # top-level field, not in tax_details
+            "gstRate":      igst if igst is not None else round(cgst + sgst, 2),
+            "cgstRate":     cgst,
+            "sgstRate":     sgst,
+            "igstRate":     igst or 0,
+        }
+
+    pos = []
+    for log in seen.values():
         payload = log.payload or {}
         details = payload.get("details", {})
-        items = [
-            {
-                "productId":    str(item.get("item_id", "")),
-                "skuCode":      item.get("sku_code", ""),
-                "upc":          item.get("upc", ""),
-                "productName":  item.get("name", ""),
-                "requestedQty": item.get("units_ordered", 0),
-                "rate":         item.get("basic_price", 0),
-                "mrp":          item.get("mrp", 0),
-                "hsnCode":      item.get("tax_details", {}).get("hsn_code"),
-                "gstRate":      (
-                    item.get("tax_details", {}).get("igst_percentage")
-                    or item.get("tax_details", {}).get("cgst_percentage", 0)
-                ),
-            }
-            for item in details.get("item_data", [])
-        ]
+        buyer   = details.get("buyer_details", {}) or {}
+        dest    = buyer.get("destination_address", {}) or {}
+        items   = [_build_po_item(i) for i in details.get("item_data", [])]
         pos.append({
             "purchaseOrderId": payload.get("po_number") or log.po_number,
             "poCode":          payload.get("po_number") or log.po_number,
@@ -555,11 +568,17 @@ def get_blinkit_pos(request: Request, db: Session = Depends(get_db)):
             "eventType":       payload.get("type", "PO_CREATION"),
             "deliveryDate":    details.get("delivery_date"),
             "expiryDate":      details.get("expiry_date"),
+            "issueDate":       details.get("issue_date"),
             "totalQty":        details.get("total_qty", 0),
             "totalAmount":     details.get("total_amount", 0),
-            "warehouseName":   details.get("buyer_details", {}).get("name"),
+            "warehouseName":   buyer.get("name"),
             "warehouseCode":   str(details.get("outlet_id", "")),
-            "buyerGstin":      details.get("buyer_details", {}).get("gstin", ""),
+            "warehouseAddress": ", ".join(filter(None, [
+                dest.get("line1"), dest.get("line2"),
+                dest.get("city"), dest.get("state"), dest.get("postal_code"),
+            ])),
+            "cityName":        dest.get("city"),
+            "buyerGstin":      buyer.get("gstin", ""),
             "items":           items,
             "receivedAt":      log.created_at.isoformat() if log.created_at else None,
         })
@@ -596,6 +615,8 @@ def get_blinkit_po(po_number: str, db: Session = Depends(get_db)):
 
     payload = log.payload or {}
     details = payload.get("details", {})
+    buyer = details.get("buyer_details", {}) or {}
+    dest  = buyer.get("destination_address", {}) or {}
     items = [
         {
             "productId":    str(item.get("item_id", "")),
@@ -605,10 +626,25 @@ def get_blinkit_po(po_number: str, db: Session = Depends(get_db)):
             "requestedQty": item.get("units_ordered", 0),
             "rate":         item.get("basic_price", 0),
             "mrp":          item.get("mrp", 0),
+            "hsnCode":      item.get("hsn_code"),
+            "cgstRate":     (item.get("tax_details", {}) or {}).get("cgst_percentage", 0),
+            "sgstRate":     (item.get("tax_details", {}) or {}).get("sgst_percentage", 0),
+            "igstRate":     (item.get("tax_details", {}) or {}).get("igst_percentage", 0),
         }
         for item in details.get("item_data", [])
     ]
-    return {"success": True, "data": {"purchaseOrderId": po_number, "items": items}}
+    return {
+        "success": True,
+        "data": {
+            "purchaseOrderId": po_number,
+            "buyerGstin":      buyer.get("gstin", ""),
+            "warehouseName":   buyer.get("name"),
+            "warehouseAddress": ", ".join(filter(None, [
+                dest.get("line1"), dest.get("city"), dest.get("state"), dest.get("postal_code"),
+            ])),
+            "items": items,
+        },
+    }
 
 
 @router.post("/blinkit/asn", tags=["Blinkit API"])
@@ -677,6 +713,36 @@ def list_blinkit_asns(po_number: str = None, db: Session = Depends(get_db)):
         asns[row.asn_id]["total_qty"] += row.invoiced_qty
 
     return {"success": True, "data": {"asns": list(asns.values()), "hasNext": False}}
+
+
+@router.delete("/blinkit/asn/{asn_id}", tags=["Blinkit API"])
+def cancel_blinkit_asn_local(asn_id: str, db: Session = Depends(get_db)):
+    """
+    Mark a locally-tracked Blinkit ASN as cancelled (local DB only).
+    Blinkit does NOT have a Cancel ASN API — this only frees up the allocated qty
+    in our tracking table so you can re-submit.  If the physical shipment is already
+    in transit, contact Blinkit directly to recall it.
+    """
+    from app.models import BlinkitASNAllocation
+    rows = (
+        db.query(BlinkitASNAllocation)
+        .filter(BlinkitASNAllocation.asn_id == asn_id, BlinkitASNAllocation.cancelled == False)
+        .all()
+    )
+    if not rows:
+        raise HTTPException(404, f"No active local tracking found for ASN '{asn_id}'")
+    for row in rows:
+        row.cancelled = True
+    db.commit()
+    return {
+        "success":        True,
+        "asn_id":         asn_id,
+        "rows_cancelled": len(rows),
+        "message":        (
+            f"ASN {asn_id} marked cancelled in local DB — allocated qty released. "
+            "Note: Blinkit has no cancel API. Contact Blinkit if shipment is already in transit."
+        ),
+    }
 
 
 @router.get("/blinkit/po/{po_number}/sku-allocations", tags=["Blinkit API"])
