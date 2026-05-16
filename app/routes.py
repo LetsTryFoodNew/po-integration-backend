@@ -807,10 +807,15 @@ async def blinkit_po_amendment(po_number: str, payload: dict = Body(...)):
 
     result = await blinkit_service.request_amendment(request_data)
     if not result["success"]:
-        raise HTTPException(
-            result.get("status_code", 502),
-            result.get("error", "Blinkit PO amendment request failed"),
-        )
+        status = result.get("status_code", 502)
+        error  = result.get("error", "Blinkit PO amendment request failed")
+        if status == 404:
+            error = (
+                "Blinkit amendment API returned 404 — the endpoint "
+                "(POST /webhook/public/v1/po/amendment) is not enabled for Vendor 18309 "
+                "in the test environment. Ask Blinkit to activate it for dev.partnersbiz.com."
+            )
+        raise HTTPException(status, error)
     return result
 
 
