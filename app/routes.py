@@ -1,4 +1,4 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Header, Response
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Request, Header, Response
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from app.database import get_db
@@ -787,7 +787,7 @@ def get_blinkit_sku_allocations(po_number: str, db: Session = Depends(get_db)):
 
 
 @router.post("/blinkit/po/{po_number}/amendment", tags=["Blinkit API"])
-async def blinkit_po_amendment(po_number: str, payload: dict):
+async def blinkit_po_amendment(po_number: str, payload: dict = Body(...)):
     """
     Request a PO amendment for items on a specific Blinkit PO.
     Corrects MRP, UPC, or UOM values that were wrong in the original PO.
