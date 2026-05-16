@@ -177,6 +177,49 @@ class BlinkitService:
             logger.error("Blinkit acknowledge_po failed: %s", e)
             return {"success": False, "error": str(e)}
 
+    # ── 3. PO Amendment ──────────────────────────────────────────────────────
+    async def request_amendment(
+        self,
+        request_data: list,
+        idempotency_key: Optional[str] = None,
+    ) -> dict:
+        """
+        POST a PO amendment to Blinkit — corrects MRP, UPC, or UOM for items on a PO.
+        Endpoint: POST /webhook/public/v1/po/amendment
+
+        Payload shape:
+          { "request_data": [
+              { "item_id": "100001",
+                "variants": [{ "upc": "...", "mrp": 99.99,
+                               "uom": {"type":"STANDARD","value":"250","unit":"g"},
+                               "po_numbers": ["PO12345"] }] }
+          ] }
+
+        Response includes updated cost_price, landing_price, tax, quantity per variant.
+        """
+        url     = self._url("webhook/public/v1/po/amendment")
+        payload = {"request_data": request_data}
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(url, json=payload, headers=self._headers(idempotency_key))
+                resp.raise_for_status()
+                data = resp.json()
+                logger.info(
+                    "Blinkit PO amendment sent: %d item(s) — success=%s",
+                    len(request_data), data.get("success"),
+                )
+                return {"success": True, "status_code": resp.status_code, "data": data}
+        except httpx.HTTPStatusError as e:
+            logger.error("Blinkit request_amendment HTTP %s: %s", e.response.status_code, e.response.text)
+            return {
+                "success":     False,
+                "status_code": e.response.status_code,
+                "error":       self._parse_error(e.response.text),
+            }
+        except Exception as e:
+            logger.error("Blinkit request_amendment failed: %s", e)
+            return {"success": False, "error": str(e)}
+
     # ── Health Check ──────────────────────────────────────────────────────────
     async def health_check(self) -> dict:
         """

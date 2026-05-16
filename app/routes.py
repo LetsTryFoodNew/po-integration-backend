@@ -786,6 +786,34 @@ def get_blinkit_sku_allocations(po_number: str, db: Session = Depends(get_db)):
     return {"po_number": po_number, "allocations": allocations}
 
 
+@router.post("/blinkit/po/{po_number}/amendment", tags=["Blinkit API"])
+async def blinkit_po_amendment(po_number: str, payload: dict):
+    """
+    Request a PO amendment for items on a specific Blinkit PO.
+    Corrects MRP, UPC, or UOM values that were wrong in the original PO.
+    Endpoint: POST /webhook/public/v1/po/amendment
+
+    Body: { request_data: [{ item_id, variants: [{ upc, mrp, uom, po_numbers }] }] }
+    """
+    request_data = payload.get("request_data", [])
+    if not request_data:
+        raise HTTPException(400, "request_data must be a non-empty list")
+
+    # Ensure every variant includes this PO number
+    for item in request_data:
+        for variant in item.get("variants", []):
+            if po_number not in (variant.get("po_numbers") or []):
+                variant.setdefault("po_numbers", []).append(po_number)
+
+    result = await blinkit_service.request_amendment(request_data)
+    if not result["success"]:
+        raise HTTPException(
+            result.get("status_code", 502),
+            result.get("error", "Blinkit PO amendment request failed"),
+        )
+    return result
+
+
 @router.post("/blinkit/po-ack", tags=["Blinkit API"])
 async def blinkit_po_ack(po_number: str, status: str = "accepted", idempotency_key: str = None):
     """
